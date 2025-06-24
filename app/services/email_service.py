@@ -8,6 +8,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from msal import ConfidentialClientApplication
+from azure.identity import InteractiveBrowserCredential, DeviceCodeCredential, TokenCachePersistenceOptions
 import httpx
 import base64
 import email
@@ -19,6 +20,9 @@ from app.models.email_models import EmailMessage, EmailThread
 from app.utils.logger import get_logger
 from app.utils.exceptions import EmailServiceError
 from google_auth_oauthlib.flow import InstalledAppFlow
+from email.mime.base import MIMEBase
+from email import encoders
+import pickle
 
 logger = get_logger(__name__)
 
@@ -31,30 +35,33 @@ class GmailService:
         self._initialize_service()
     
     def _initialize_service(self):
-        """Initialize Gmail API service"""
+        """Initialize Gmail API service with fallback and refresh_token validation"""
         try:
-            if os.path.exists(settings.gmail_token_file):
+            token_path = settings.gmail_token_file
+            credentials_path = settings.gmail_credentials_file
+            scopes = settings.gmail_scopes
+            creds = None
+
+            if os.path.exists(token_path):
                 try:
-                    self.credentials = Credentials.from_authorized_user_file(
-                        settings.gmail_token_file, settings.gmail_scopes
-                    )
+                    creds = Credentials.from_authorized_user_file(token_path, scopes)
+                    if not creds.refresh_token:
+                        raise ValueError("Missing refresh_token in token file")
                 except Exception as e:
-                    logger.warning("Invalid token file, removing and regenerating.")
-                    os.remove(settings.gmail_token_file)
+                    logger.warning(f"Invalid token file, regenerating. Reason: {e}")
+                    os.remove(token_path)
+                    creds = None
 
-            if not self.credentials or not self.credentials.valid:
-                if self.credentials and self.credentials.expired and self.credentials.refresh_token:
-                    self.credentials.refresh(Request())
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        settings.gmail_credentials_file, settings.gmail_scopes
-                    )
-                    self.credentials = flow.run_local_server(port=8080)
-                    
-                    # Save new token
-                    with open(settings.gmail_token_file, "w") as token_file:
-                        token_file.write(self.credentials.to_json())
+                    flow = InstalledAppFlow.from_client_secrets_file(credentials_path, scopes)
+                    creds = flow.run_local_server(port=8080, access_type='offline', prompt='consent')
+                    with open(token_path, "w") as token:
+                        token.write(creds.to_json())
 
+            self.credentials = creds
             self.service = build('gmail', 'v1', credentials=self.credentials)
             logger.info("Gmail service initialized successfully")
 
@@ -63,34 +70,61 @@ class GmailService:
             raise EmailServiceError(f"Gmail initialization failed: {e}")
     
     async def get_messages(self, query: str = "", max_results: int = 50) -> List[EmailMessage]:
-        """Retrieve email messages from Gmail"""
+        """Retrieve unread email messages from Gmail from the configured sender"""
         try:
-            # Add unread filter and sender filter to query
+            # Use a simple query for unread emails from the sender
             query = f"is:unread from:{settings.sender_email} " + query
-            
-            # Search for messages
-            results = self.service.users().messages().list(
-                userId='me', q=query, maxResults=max_results
-            ).execute()
-            
-            messages = results.get('messages', [])
-            email_messages = []
-            
-            for msg in messages:
-                # Get full message details
-                message = self.service.users().messages().get(
-                    userId='me', id=msg['id'], format='full'
+            results = (
+                self.service.users().messages().list(
+                    userId="me",
+                    labelIds=["INBOX"],
+                    q=query,
+                    maxResults=max_results,
                 ).execute()
-                
-                # Parse message
-                email_msg = self._parse_gmail_message(message)
-                if email_msg:
-                    email_msg.message_id = f"gmail_{email_msg.message_id}"  # Add service prefix
-                    email_messages.append(email_msg)
-            
+            )
+            messages = results.get("messages", [])
+            email_messages = []
+            for msg in messages:
+                msg_id = msg["id"]
+                msg_data = (
+                    self.service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+                )
+                payload = msg_data.get("payload", {})
+                headers = payload.get("headers", [])
+                subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
+                sender = next((h["value"] for h in headers if h["name"] == "From"), "")
+                recipient = next((h["value"] for h in headers if h["name"] == "To"), "")
+                date_str = next((h["value"] for h in headers if h["name"] == "Date"), "")
+                body = ""
+                parts = payload.get("parts", [])
+                for part in parts:
+                    if part.get("mimeType") == "text/plain":
+                        data = part["body"].get("data")
+                        if data:
+                            body = base64.urlsafe_b64decode(data).decode()
+                            break
+                # Parse sender email and name
+                sender_email, sender_name = self._parse_email_address(sender)
+                recipient_email, _ = self._parse_email_address(recipient)
+                received_date = self._parse_email_date(date_str)
+                email_msg = EmailMessage(
+                    message_id=f"gmail_{msg_id}",
+                    thread_id=msg_data.get("threadId"),
+                    subject=subject,
+                    sender_email=sender_email,
+                    sender_name=sender_name,
+                    recipient_email=recipient_email,
+                    body_text=body,
+                    body_html=None,
+                    received_date=received_date
+                )
+                email_messages.append(email_msg)
+                # Mark as read
+                self.service.users().messages().modify(
+                    userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
             logger.info(f"Retrieved {len(email_messages)} Gmail messages")
             return email_messages
-            
         except HttpError as e:
             logger.error(f"Gmail API error: {e}")
             raise EmailServiceError(f"Failed to retrieve Gmail messages: {e}")
@@ -200,75 +234,77 @@ class GmailService:
             raise EmailServiceError(f"Failed to mark message as read: {e}")
 
 class OutlookService:
-    """Microsoft Outlook/Graph API integration service"""
-    
     def __init__(self):
-        self.app = ConfidentialClientApplication(
-            settings.outlook_client_id,
-            authority=f"https://login.microsoftonline.com/{settings.outlook_tenant_id}",
-            client_credential=settings.outlook_client_secret
+        # Device Code Flow: no redirect URI or client secret required
+        self.credential = DeviceCodeCredential(
+            client_id=settings.outlook_client_id,
+            tenant_id=settings.outlook_tenant_id,
+            cache_persistence_options=TokenCachePersistenceOptions(
+                enabled=True,
+                name="outlook_cache",
+                allow_unencrypted_storage=True
+            )
         )
         self.access_token = None
         self._get_access_token()
-    
+
     def _get_access_token(self):
-        """Get access token for Microsoft Graph API"""
         try:
-            result = self.app.acquire_token_for_client(
-                scopes=["https://graph.microsoft.com/.default"]
-            )
-            
-            if "access_token" in result:
-                self.access_token = result["access_token"]
-                logger.info("Outlook access token acquired successfully")
-            else:
-                logger.error(f"Failed to acquire Outlook token: {result.get('error_description')}")
-                raise EmailServiceError("Failed to authenticate with Outlook")
-                
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            self.access_token = token.token
+            logger.info("Outlook access token acquired successfully")
         except Exception as e:
-            logger.error(f"Outlook authentication error: {e}")
+            logger.error(f"Outlook device-code auth error: {e}")
             raise EmailServiceError(f"Outlook authentication failed: {e}")
     
     async def get_messages(self, user_email: str = None, max_results: int = 50) -> List[EmailMessage]:
         """Retrieve email messages from Outlook"""
         try:
             if not user_email:
-                user_email = settings.sender_email
-                
+                user_email = settings.outlook_user_id
             headers = {
                 'Authorization': f'Bearer {self.access_token}',
                 'Content-Type': 'application/json'
             }
-            
-            # Microsoft Graph API endpoint with filters
+            # Use /users/{user_id}/messages for application permissions
             url = f"https://graph.microsoft.com/v1.0/users/{user_email}/messages"
+
             params = {
                 '$top': max_results,
-                '$filter': f"isRead eq false and from/emailAddress/address eq '{settings.sender_email}'",
-                '$orderby': 'receivedDateTime desc',
-                '$select': 'id,subject,from,toRecipients,receivedDateTime,body,conversationId'
+                '$select': 'id,subject,from,toRecipients,receivedDateTime,body,conversationId',
+                '$orderby': 'receivedDateTime desc'
             }
-            
+
             async with httpx.AsyncClient() as client:
                 response = await client.get(url, headers=headers, params=params)
+                if response.status_code == 400:
+                    logger.warning(f"Outlook API 400 Bad Request: {response.text}")
+                    return []
                 response.raise_for_status()
-                
                 data = response.json()
                 messages = data.get('value', [])
-                
+
+                filtered_msgs = [
+                    msg for msg in messages
+                    if not msg.get("isRead") and
+                    msg.get("from", {}).get("emailAddress", {}).get("address", "").lower() == settings.sender_email.lower()
+                ]
+
                 email_messages = []
-                for msg in messages:
+                for msg in filtered_msgs:
                     email_msg = self._parse_outlook_message(msg)
                     if email_msg:
-                        email_msg.message_id = f"outlook_{email_msg.message_id}"  # Add service prefix
+                        email_msg.message_id = f"outlook_{email_msg.message_id}"
                         email_messages.append(email_msg)
-                
+
                 logger.info(f"Retrieved {len(email_messages)} Outlook messages")
                 return email_messages
-                
         except httpx.HTTPError as e:
             logger.error(f"Outlook API error: {e}")
-            raise EmailServiceError(f"Failed to retrieve Outlook messages: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error in OutlookService.get_messages: {e}")
+            return []
     
     def _parse_outlook_message(self, message: Dict) -> Optional[EmailMessage]:
         """Parse Outlook message into EmailMessage model"""
@@ -327,7 +363,7 @@ class OutlookService:
                 'Content-Type': 'application/json'
             }
             
-            url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}"
+            url = f"https://graph.microsoft.com/v1.0/users/{settings.sender_email}/messages/{message_id}"
             data = {
                 'isRead': True
             }
@@ -384,18 +420,43 @@ class EmailService:
                           attachments: List[str] = None) -> bool:
         """Send response email with quote"""
         try:
-            # Determine which service to use based on message_id prefix
             if message_id.startswith('gmail_'):
-                # Use Gmail service to send
-                pass  # TODO: Implement Gmail send
+                # Use Gmail API to send email with attachment
+                message = MIMEMultipart()
+                message['to'] = recipient
+                message['from'] = settings.sender_email
+                message['subject'] = subject
+                if thread_id:
+                    message.add_header('In-Reply-To', thread_id)
+                message.attach(MIMEText(body, 'plain'))
+                
+                # Attach files
+                for file_path in attachments or []:
+                    filename = os.path.basename(file_path)
+                    with open(file_path, 'rb') as f:
+                        part = MIMEBase('application', 'octet-stream')
+                        part.set_payload(f.read())
+                        encoders.encode_base64(part)
+                        part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+                        message.attach(part)
+                
+                # Encode message
+                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+                send_body = {'raw': raw_message}
+                if thread_id:
+                    send_body['threadId'] = thread_id
+                
+                self.gmail_service.service.users().messages().send(
+                    userId='me', body=send_body
+                ).execute()
+                logger.info(f"Sent Gmail response to {recipient}")
+                return True
             elif message_id.startswith('outlook_'):
-                # Use Outlook service to send
-                pass  # TODO: Implement Outlook send
+                # TODO: Implement Outlook send with attachment using Microsoft Graph API
+                logger.warning("Outlook send_response not implemented yet.")
+                return False
             else:
                 raise EmailServiceError("Unknown email service")
-                
-            return True
-            
         except Exception as e:
             logger.error(f"Failed to send response email: {e}")
             return False

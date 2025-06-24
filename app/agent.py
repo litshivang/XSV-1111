@@ -5,12 +5,12 @@ from datetime import datetime, timedelta
 
 from app.config import settings
 from app.services.email_service import EmailService
-from app.services.ai_service import AIService
-from app.services.excel_service import ExcelService
+from app.services.ai_service import TravelInfoExtractor
+from app.services.excel_service import ExcelQuoteGenerator
 from app.models.email_models import EmailMessage
-from app.models.travel_models import ProcessingStatus
+from app.models.travel_models import ProcessingStatus, TravelQuoteData
 from app.utils.logger import get_logger
-from app.database import get_redis
+from app.utils.redis_client import get_redis_client
 
 logger = get_logger(__name__)
 
@@ -19,9 +19,9 @@ class TravelAgent:
     
     def __init__(self):
         self.email_service = EmailService()
-        self.ai_service = AIService()
-        self.excel_service = ExcelService()
-        self.redis = get_redis()
+        self.ai_extractor = TravelInfoExtractor()
+        self.excel_generator = ExcelQuoteGenerator()
+        self.redis = get_redis_client()
         
     async def _is_email_processed(self, message_id: str) -> bool:
         """Check if an email has been processed already"""
@@ -61,12 +61,11 @@ class TravelAgent:
                 return False
             
             # Extract trip requirements using AI
-            trip_requirements = await self.ai_service.extract_trip_requirements(
-                message.body_text or message.body_html
-            )
-            
+            inquiry = await self.ai_extractor.extract_travel_info(message)
+            # Generate dummy quote data (should be replaced with real pricing logic)
+            quote_data = TravelQuoteData.create_placeholder(inquiry)
             # Generate Excel quote
-            quote_file = await self.excel_service.generate_quote(trip_requirements)
+            quote_file = await self.excel_generator.generate_quote(inquiry, quote_data)
             
             # Send response email with quote
             await self.email_service.send_response(
@@ -74,7 +73,8 @@ class TravelAgent:
                 thread_id=message.thread_id,
                 recipient=message.sender_email,
                 subject=f"Re: {message.subject}",
-                body="Please find attached the travel quote as requested.",
+                body=("Dear Traveler,\n\nThank you for your inquiry. Please find attached your customized travel quotation.\n"
+                      "If you have any questions or need further customization, feel free to reply to this email.\n\nBest regards,\nYour Travel Agency Team"),
                 attachments=[quote_file]
             )
             
@@ -94,25 +94,21 @@ class TravelAgent:
     async def process_batch(self, max_emails: Optional[int] = None) -> int:
         """Process a batch of unread emails"""
         try:
-            # Get unread travel inquiries
             messages = await self.email_service.get_travel_inquiries(
                 source="both",
                 max_results=max_emails or settings.max_emails_per_batch
             )
-            
-            # Process each message
+            if not messages:
+                logger.info("No new travel inquiry emails found from Gmail or Outlook.")
+                return 0
             processed_count = 0
             for message in messages:
                 if await self.process_single_email(message):
                     processed_count += 1
-                    
-                # Rate limiting
                 if processed_count >= settings.rate_limit_per_minute:
                     logger.warning("Rate limit reached, pausing processing")
                     break
-                    
             return processed_count
-            
         except Exception as e:
             logger.error(f"Batch processing failed: {e}")
             return 0

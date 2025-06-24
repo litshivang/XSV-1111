@@ -4,8 +4,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import json
 import re
 from datetime import datetime, timedelta
-from langchain.llms import OpenAI
-from langchain.chat_models import ChatOpenAI
+from langchain_community.llms import OpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain.schema import BaseOutputParser
 from langchain.output_parsers import PydanticOutputParser
@@ -117,7 +117,7 @@ class TravelInfoExtractor:
             response = await self._get_ai_response(formatted_prompt.to_messages())
             
             # Parse response
-            travel_info = self.output_parser.parse(response.content)
+            travel_info = self.output_parser.parse(response.text)
             
             # Add metadata
             travel_info.original_language = language
