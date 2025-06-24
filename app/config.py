@@ -1,7 +1,11 @@
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, EmailStr
+
+
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=".env", override=True)
 
 class Settings(BaseSettings):
     """Application configuration settings"""
@@ -28,7 +32,9 @@ class Settings(BaseSettings):
     # Email Integration - Gmail
     gmail_credentials_file: str = Field(env="GMAIL_CREDENTIALS_FILE")
     gmail_token_file: str = Field(env="GMAIL_TOKEN_FILE")
-    gmail_scopes: list = ["https://www.googleapis.com/auth/gmail.readonly"]
+    gmail_scopes: list = ["https://www.googleapis.com/auth/gmail.readonly", 
+                         "https://www.googleapis.com/auth/gmail.modify"]  # Added modify scope for marking as read
+    sender_email: EmailStr = Field(env="SENDER_EMAIL")
     
     # Email Integration - Outlook
     outlook_client_id: str = Field(env="OUTLOOK_CLIENT_ID")
@@ -42,6 +48,7 @@ class Settings(BaseSettings):
     # Email Processing
     max_emails_per_batch: int = Field(default=50, env="MAX_EMAILS_PER_BATCH")
     email_processing_timeout: int = Field(default=300, env="EMAIL_PROCESSING_TIMEOUT")
+    processed_emails_cache_ttl: int = Field(default=86400, env="PROCESSED_EMAILS_CACHE_TTL")
     
     # Performance
     max_workers: int = Field(default=4, env="MAX_WORKERS")
@@ -56,3 +63,4 @@ class Settings(BaseSettings):
         case_sensitive = False
 
 settings = Settings()
+print("Loaded OUTLOOK_CLIENT_ID =", settings.outlook_client_id)

@@ -2,7 +2,7 @@
 DEBUG=True
 
 # Database
-DATABASE_URL=postgresql://username:password@localhost:5432/your_database
+DATABASE_URL=postgresql://postgres:root@localhost:5432/trip
 DATABASE_POOL_SIZE=20
 
 # Redis & Celery
@@ -18,10 +18,11 @@ AI_TEMPERATURE=0.1
 # Gmail Integration
 GMAIL_CREDENTIALS_FILE=config/credentials.json
 GMAIL_TOKEN_FILE=config/token.pickle
+SENDER_EMAIL=shivangnvyas@gmail.com
 
 # Outlook Integration
-OUTLOOK_CLIENT_ID=your-outlook-client-id
-OUTLOOK_CLIENT_SECRET=your-outlook-client-secret
+OUTLOOK_CLIENT_ID=your-client-id
+OUTLOOK_CLIENT_SECRET=your-client-secret
 OUTLOOK_TENANT_ID=your-tenant-id
 
 # File Storage
@@ -31,6 +32,7 @@ TEMPLATE_PATH=./templates
 # Email Processing
 MAX_EMAILS_PER_BATCH=50
 EMAIL_PROCESSING_TIMEOUT=300
+PROCESSED_EMAILS_CACHE_TTL=86400  # 24 hours in seconds
 
 # Performance
 MAX_WORKERS=4

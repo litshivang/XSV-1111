@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from google.oauth2.credentials import Credentials
@@ -12,16 +13,17 @@ import base64
 import email
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
+from google.auth.transport.requests import Request
 from app.config import settings
 from app.models.email_models import EmailMessage, EmailThread
 from app.utils.logger import get_logger
 from app.utils.exceptions import EmailServiceError
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 logger = get_logger(__name__)
 
 class GmailService:
-    """Gmail API integration service"""
+    """Gmail API integration service""" 
     
     def __init__(self):
         self.credentials = None
@@ -31,30 +33,31 @@ class GmailService:
     def _initialize_service(self):
         """Initialize Gmail API service"""
         try:
-            # Load credentials from file
             if os.path.exists(settings.gmail_token_file):
-                self.credentials = Credentials.from_authorized_user_file(
-                    settings.gmail_token_file, settings.gmail_scopes
-                )
-            
-            # If credentials are not valid, initiate OAuth flow
+                try:
+                    self.credentials = Credentials.from_authorized_user_file(
+                        settings.gmail_token_file, settings.gmail_scopes
+                    )
+                except Exception as e:
+                    logger.warning("Invalid token file, removing and regenerating.")
+                    os.remove(settings.gmail_token_file)
+
             if not self.credentials or not self.credentials.valid:
                 if self.credentials and self.credentials.expired and self.credentials.refresh_token:
                     self.credentials.refresh(Request())
                 else:
-                    flow = Flow.from_client_secrets_file(
+                    flow = InstalledAppFlow.from_client_secrets_file(
                         settings.gmail_credentials_file, settings.gmail_scopes
                     )
-                    flow.redirect_uri = 'http://localhost:8080/callback'
+                    self.credentials = flow.run_local_server(port=8080)
                     
-                    # Note: In production, implement proper OAuth flow
-                    logger.warning("Gmail credentials need manual authorization")
-                    raise EmailServiceError("Gmail authentication required")
-            
-            # Build the service
+                    # Save new token
+                    with open(settings.gmail_token_file, "w") as token_file:
+                        token_file.write(self.credentials.to_json())
+
             self.service = build('gmail', 'v1', credentials=self.credentials)
             logger.info("Gmail service initialized successfully")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize Gmail service: {e}")
             raise EmailServiceError(f"Gmail initialization failed: {e}")
@@ -62,6 +65,9 @@ class GmailService:
     async def get_messages(self, query: str = "", max_results: int = 50) -> List[EmailMessage]:
         """Retrieve email messages from Gmail"""
         try:
+            # Add unread filter and sender filter to query
+            query = f"is:unread from:{settings.sender_email} " + query
+            
             # Search for messages
             results = self.service.users().messages().list(
                 userId='me', q=query, maxResults=max_results
@@ -79,6 +85,7 @@ class GmailService:
                 # Parse message
                 email_msg = self._parse_gmail_message(message)
                 if email_msg:
+                    email_msg.message_id = f"gmail_{email_msg.message_id}"  # Add service prefix
                     email_messages.append(email_msg)
             
             logger.info(f"Retrieved {len(email_messages)} Gmail messages")
@@ -174,6 +181,24 @@ class GmailService:
         except Exception:
             return datetime.now()
 
+    async def mark_as_read(self, message_id: str):
+        """Mark a Gmail message as read"""
+        try:
+            # Remove service prefix
+            if message_id.startswith('gmail_'):
+                message_id = message_id[6:]
+                
+            self.service.users().messages().modify(
+                userId='me',
+                id=message_id,
+                body={'removeLabelIds': ['UNREAD']}
+            ).execute()
+            logger.info(f"Marked Gmail message {message_id} as read")
+            
+        except Exception as e:
+            logger.error(f"Failed to mark Gmail message as read: {e}")
+            raise EmailServiceError(f"Failed to mark message as read: {e}")
+
 class OutlookService:
     """Microsoft Outlook/Graph API integration service"""
     
@@ -204,18 +229,22 @@ class OutlookService:
             logger.error(f"Outlook authentication error: {e}")
             raise EmailServiceError(f"Outlook authentication failed: {e}")
     
-    async def get_messages(self, user_email: str, max_results: int = 50) -> List[EmailMessage]:
+    async def get_messages(self, user_email: str = None, max_results: int = 50) -> List[EmailMessage]:
         """Retrieve email messages from Outlook"""
         try:
+            if not user_email:
+                user_email = settings.sender_email
+                
             headers = {
                 'Authorization': f'Bearer {self.access_token}',
                 'Content-Type': 'application/json'
             }
             
-            # Microsoft Graph API endpoint
+            # Microsoft Graph API endpoint with filters
             url = f"https://graph.microsoft.com/v1.0/users/{user_email}/messages"
             params = {
                 '$top': max_results,
+                '$filter': f"isRead eq false and from/emailAddress/address eq '{settings.sender_email}'",
                 '$orderby': 'receivedDateTime desc',
                 '$select': 'id,subject,from,toRecipients,receivedDateTime,body,conversationId'
             }
@@ -231,6 +260,7 @@ class OutlookService:
                 for msg in messages:
                     email_msg = self._parse_outlook_message(msg)
                     if email_msg:
+                        email_msg.message_id = f"outlook_{email_msg.message_id}"  # Add service prefix
                         email_messages.append(email_msg)
                 
                 logger.info(f"Retrieved {len(email_messages)} Outlook messages")
@@ -285,6 +315,33 @@ class OutlookService:
             logger.error(f"Failed to parse Outlook message: {e}")
             return None
 
+    async def mark_as_read(self, message_id: str):
+        """Mark an Outlook message as read"""
+        try:
+            # Remove service prefix
+            if message_id.startswith('outlook_'):
+                message_id = message_id[8:]
+                
+            headers = {
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}"
+            data = {
+                'isRead': True
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(url, headers=headers, json=data)
+                response.raise_for_status()
+                
+            logger.info(f"Marked Outlook message {message_id} as read")
+            
+        except Exception as e:
+            logger.error(f"Failed to mark Outlook message as read: {e}")
+            raise EmailServiceError(f"Failed to mark message as read: {e}")
+
 class EmailService:
     """Unified email service for Gmail and Outlook"""
     
@@ -307,10 +364,8 @@ class EmailService:
                 all_messages.extend(gmail_messages)
             
             if source in ["outlook", "both"]:
-                # Note: You'll need to specify user email for Outlook
-                # This should be configured based on your organization's setup
                 outlook_messages = await self.outlook_service.get_messages(
-                    user_email="travel@yourcompany.com", max_results=max_results
+                    max_results=max_results
                 )
                 all_messages.extend(outlook_messages)
             
@@ -323,3 +378,24 @@ class EmailService:
         except Exception as e:
             logger.error(f"Failed to retrieve travel inquiries: {e}")
             raise EmailServiceError(f"Email retrieval failed: {e}")
+            
+    async def send_response(self, message_id: str, thread_id: Optional[str], 
+                          recipient: str, subject: str, body: str, 
+                          attachments: List[str] = None) -> bool:
+        """Send response email with quote"""
+        try:
+            # Determine which service to use based on message_id prefix
+            if message_id.startswith('gmail_'):
+                # Use Gmail service to send
+                pass  # TODO: Implement Gmail send
+            elif message_id.startswith('outlook_'):
+                # Use Outlook service to send
+                pass  # TODO: Implement Outlook send
+            else:
+                raise EmailServiceError("Unknown email service")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to send response email: {e}")
+            return False

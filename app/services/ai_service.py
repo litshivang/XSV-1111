@@ -1,325 +1,335 @@
 import asyncio
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+import json
+import re
 from datetime import datetime, timedelta
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from msal import ConfidentialClientApplication
-import httpx
-import base64
-import email
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from langchain.llms import OpenAI
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain.schema import BaseOutputParser
+from langchain.output_parsers import PydanticOutputParser
+from langdetect import detect
+from googletrans import Translator
 
 from app.config import settings
-from app.models.email_models import EmailMessage, EmailThread
+from app.models.travel_models import TravelInquiryData
+from app.models.email_models import EmailMessage
 from app.utils.logger import get_logger
-from app.utils.exceptions import EmailServiceError
+from app.utils.exceptions import AIServiceError
 
 logger = get_logger(__name__)
 
-class GmailService:
-    """Gmail API integration service"""
+class TravelInfoExtractor:
+    """AI service for extracting travel information from emails"""
     
     def __init__(self):
-        self.credentials = None
-        self.service = None
-        self._initialize_service()
-    
-    def _initialize_service(self):
-        """Initialize Gmail API service"""
-        try:
-            # Load credentials from file
-            if os.path.exists(settings.gmail_token_file):
-                self.credentials = Credentials.from_authorized_user_file(
-                    settings.gmail_token_file, settings.gmail_scopes
-                )
-            
-            # If credentials are not valid, initiate OAuth flow
-            if not self.credentials or not self.credentials.valid:
-                if self.credentials and self.credentials.expired and self.credentials.refresh_token:
-                    self.credentials.refresh(Request())
-                else:
-                    flow = Flow.from_client_secrets_file(
-                        settings.gmail_credentials_file, settings.gmail_scopes
-                    )
-                    flow.redirect_uri = 'http://localhost:8080/callback'
-                    
-                    # Note: In production, implement proper OAuth flow
-                    logger.warning("Gmail credentials need manual authorization")
-                    raise EmailServiceError("Gmail authentication required")
-            
-            # Build the service
-            self.service = build('gmail', 'v1', credentials=self.credentials)
-            logger.info("Gmail service initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize Gmail service: {e}")
-            raise EmailServiceError(f"Gmail initialization failed: {e}")
-    
-    async def get_messages(self, query: str = "", max_results: int = 50) -> List[EmailMessage]:
-        """Retrieve email messages from Gmail"""
-        try:
-            # Search for messages
-            results = self.service.users().messages().list(
-                userId='me', q=query, maxResults=max_results
-            ).execute()
-            
-            messages = results.get('messages', [])
-            email_messages = []
-            
-            for msg in messages:
-                # Get full message details
-                message = self.service.users().messages().get(
-                    userId='me', id=msg['id'], format='full'
-                ).execute()
-                
-                # Parse message
-                email_msg = self._parse_gmail_message(message)
-                if email_msg:
-                    email_messages.append(email_msg)
-            
-            logger.info(f"Retrieved {len(email_messages)} Gmail messages")
-            return email_messages
-            
-        except HttpError as e:
-            logger.error(f"Gmail API error: {e}")
-            raise EmailServiceError(f"Failed to retrieve Gmail messages: {e}")
-    
-    def _parse_gmail_message(self, message: Dict) -> Optional[EmailMessage]:
-        """Parse Gmail message into EmailMessage model"""
-        try:
-            payload = message['payload']
-            headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
-            
-            # Extract basic information
-            message_id = message['id']
-            thread_id = message['threadId']
-            subject = headers.get('subject', 'No Subject')
-            sender = headers.get('from', '')
-            recipient = headers.get('to', '')
-            date_str = headers.get('date', '')
-            
-            # Parse sender email and name
-            sender_email, sender_name = self._parse_email_address(sender)
-            recipient_email, _ = self._parse_email_address(recipient)
-            
-            # Parse date
-            received_date = self._parse_email_date(date_str)
-            
-            # Extract body
-            body_text, body_html = self._extract_message_body(payload)
-            
-            return EmailMessage(
-                message_id=message_id,
-                thread_id=thread_id,
-                subject=subject,
-                sender_email=sender_email,
-                sender_name=sender_name,
-                recipient_email=recipient_email,
-                body_text=body_text,
-                body_html=body_html,
-                received_date=received_date
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to parse Gmail message: {e}")
-            return None
-    
-    def _extract_message_body(self, payload: Dict) -> tuple[Optional[str], Optional[str]]:
-        """Extract text and HTML body from message payload"""
-        body_text = None
-        body_html = None
-        
-        if 'parts' in payload:
-            for part in payload['parts']:
-                mime_type = part.get('mimeType', '')
-                if mime_type == 'text/plain' and 'data' in part['body']:
-                    body_text = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
-                elif mime_type == 'text/html' and 'data' in part['body']:
-                    body_html = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
-        else:
-            # Single part message
-            if payload.get('mimeType') == 'text/plain' and 'data' in payload['body']:
-                body_text = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
-            elif payload.get('mimeType') == 'text/html' and 'data' in payload['body']:
-                body_html = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8')
-        
-        return body_text, body_html
-    
-    @staticmethod
-    def _parse_email_address(email_str: str) -> tuple[str, Optional[str]]:
-        """Parse email address and name from string"""
-        try:
-            if '<' in email_str and '>' in email_str:
-                # Format: "Name <email@domain.com>"
-                name = email_str.split('<')[0].strip().strip('"')
-                email_addr = email_str.split('<')[1].split('>')[0].strip()
-                return email_addr, name if name else None
-            else:
-                # Format: "email@domain.com"
-                return email_str.strip(), None
-        except Exception:
-            return email_str.strip(), None
-    
-    @staticmethod
-    def _parse_email_date(date_str: str) -> datetime:
-        """Parse email date string to datetime"""
-        try:
-            # Gmail typically uses RFC 2822 format
-            from email.utils import parsedate_to_datetime
-            return parsedate_to_datetime(date_str)
-        except Exception:
-            return datetime.now()
-
-class OutlookService:
-    """Microsoft Outlook/Graph API integration service"""
-    
-    def __init__(self):
-        self.app = ConfidentialClientApplication(
-            settings.outlook_client_id,
-            authority=f"https://login.microsoftonline.com/{settings.outlook_tenant_id}",
-            client_credential=settings.outlook_client_secret
+        self.llm = ChatOpenAI(
+            model=settings.openai_model,
+            temperature=settings.ai_temperature,
+            openai_api_key=settings.openai_api_key
         )
-        self.access_token = None
-        self._get_access_token()
+        self.translator = Translator()
+        self.output_parser = PydanticOutputParser(pydantic_object=TravelInquiryData)
+        self._setup_prompts()
     
-    def _get_access_token(self):
-        """Get access token for Microsoft Graph API"""
+    def _setup_prompts(self):
+        """Setup LangChain prompts for travel information extraction"""
+        
+        # System prompt for travel extraction
+        system_template = """
+        You are an expert AI assistant specializing in extracting structured travel information from unstructured email inquiries.
+        You work for a B2B travel agency and need to extract detailed travel requirements from customer emails.
+        
+        Your task is to analyze email content and extract the following information:
+        - Number of travelers
+        - Destinations (cities, countries, regions)
+        - Travel dates (start and end dates)
+        - Departure city
+        - Hotel preferences (star rating, type, special requirements)
+        - Meal preferences (vegetarian, non-vegetarian, specific diets)
+        - Sightseeing activities and attractions
+        - Guide and language preferences
+        - Service requirements (visa, insurance, flights)
+        - Budget range (if mentioned)
+        - Special requirements or requests
+        - Inquiry deadline
+        
+        IMPORTANT GUIDELINES:
+        1. Extract only explicitly mentioned information - do not assume or infer details
+        2. For dates, convert to ISO format (YYYY-MM-DD) when possible
+        3. Normalize location names to standard formats
+        4. Set extraction_confidence (0-100) based on clarity of information
+        5. Set requires_clarification=True if critical information is missing or unclear
+        6. Handle multilingual content (English, Hindi, or mixed)
+        7. If budget is mentioned in any currency, normalize to INR if possible
+        
+        Output the extracted information in the exact JSON format specified by the schema.
+        
+        {format_instructions}
+        """
+        
+        human_template = """
+        Please extract travel information from the following email:
+        
+        Email Subject: {subject}
+        Email Content: {content}
+        Sender: {sender}
+        Language Detected: {language}
+        
+        Extract all relevant travel information and provide a confidence score.
+        """
+        
+        system_message = SystemMessagePromptTemplate.from_template(system_template)
+        human_message = HumanMessagePromptTemplate.from_template(human_template)
+        
+        self.extraction_prompt = ChatPromptTemplate.from_messages([
+            system_message,
+            human_message
+        ])
+    
+    async def extract_travel_info(self, email: EmailMessage) -> TravelInquiryData:
+        """Extract travel information from an email message"""
         try:
-            result = self.app.acquire_token_for_client(
-                scopes=["https://graph.microsoft.com/.default"]
+            # Detect language and translate if necessary
+            content = email.body_text or email.body_html or ""
+            language = self._detect_language(content)
+            
+            # Translate to English if needed for better processing
+            translated_content = content
+            if language and language != 'en':
+                try:
+                    translated_content = self.translator.translate(content, dest='en').text
+                    logger.info(f"Translated email from {language} to English")
+                except Exception as e:
+                    logger.warning(f"Translation failed: {e}, using original content")
+            
+            # Prepare prompt
+            formatted_prompt = self.extraction_prompt.format_prompt(
+                subject=email.subject,
+                content=translated_content,
+                sender=f"{email.sender_name} <{email.sender_email}>",
+                language=language,
+                format_instructions=self.output_parser.get_format_instructions()
             )
             
-            if "access_token" in result:
-                self.access_token = result["access_token"]
-                logger.info("Outlook access token acquired successfully")
-            else:
-                logger.error(f"Failed to acquire Outlook token: {result.get('error_description')}")
-                raise EmailServiceError("Failed to authenticate with Outlook")
-                
+            # Get AI response
+            response = await self._get_ai_response(formatted_prompt.to_messages())
+            
+            # Parse response
+            travel_info = self.output_parser.parse(response.content)
+            
+            # Add metadata
+            travel_info.original_language = language
+            
+            # Validate and enhance extracted data
+            travel_info = self._validate_and_enhance(travel_info, email)
+            
+            logger.info(f"Successfully extracted travel info with {travel_info.extraction_confidence}% confidence")
+            return travel_info
+            
         except Exception as e:
-            logger.error(f"Outlook authentication error: {e}")
-            raise EmailServiceError(f"Outlook authentication failed: {e}")
-    
-    async def get_messages(self, user_email: str, max_results: int = 50) -> List[EmailMessage]:
-        """Retrieve email messages from Outlook"""
-        try:
-            headers = {
-                'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            # Microsoft Graph API endpoint
-            url = f"https://graph.microsoft.com/v1.0/users/{user_email}/messages"
-            params = {
-                '$top': max_results,
-                '$orderby': 'receivedDateTime desc',
-                '$select': 'id,subject,from,toRecipients,receivedDateTime,body,conversationId'
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, headers=headers, params=params)
-                response.raise_for_status()
-                
-                data = response.json()
-                messages = data.get('value', [])
-                
-                email_messages = []
-                for msg in messages:
-                    email_msg = self._parse_outlook_message(msg)
-                    if email_msg:
-                        email_messages.append(email_msg)
-                
-                logger.info(f"Retrieved {len(email_messages)} Outlook messages")
-                return email_messages
-                
-        except httpx.HTTPError as e:
-            logger.error(f"Outlook API error: {e}")
-            raise EmailServiceError(f"Failed to retrieve Outlook messages: {e}")
-    
-    def _parse_outlook_message(self, message: Dict) -> Optional[EmailMessage]:
-        """Parse Outlook message into EmailMessage model"""
-        try:
-            message_id = message['id']
-            thread_id = message.get('conversationId')
-            subject = message.get('subject', 'No Subject')
-            
-            # Parse sender
-            from_data = message.get('from', {})
-            sender_data = from_data.get('emailAddress', {})
-            sender_email = sender_data.get('address', '')
-            sender_name = sender_data.get('name')
-            
-            # Parse recipients
-            recipients = message.get('toRecipients', [])
-            recipient_email = recipients[0]['emailAddress']['address'] if recipients else None
-            
-            # Parse date
-            received_date_str = message.get('receivedDateTime')
-            received_date = datetime.fromisoformat(received_date_str.replace('Z', '+00:00'))
-            
-            # Extract body
-            body_data = message.get('body', {})
-            body_content = body_data.get('content', '')
-            body_type = body_data.get('contentType', 'text')
-            
-            body_text = body_content if body_type == 'text' else None
-            body_html = body_content if body_type == 'html' else None
-            
-            return EmailMessage(
-                message_id=message_id,
-                thread_id=thread_id,
-                subject=subject,
-                sender_email=sender_email,
-                sender_name=sender_name,
-                recipient_email=recipient_email,
-                body_text=body_text,
-                body_html=body_html,
-                received_date=received_date
+            logger.error(f"Failed to extract travel information: {e}")
+            # Return minimal structure with error indication
+            return TravelInquiryData(
+                extraction_confidence=0,
+                requires_clarification=True,
+                clarification_notes=f"Extraction failed: {str(e)}",
+                original_language=self._detect_language(email.body_text or "")
             )
-            
+    
+    async def _get_ai_response(self, messages):
+        """Get response from AI model with retry logic"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await self.llm.agenerate([messages])
+                return response.generations[0][0]
+            except Exception as e:
+                logger.warning(f"AI request attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    raise AIServiceError(f"AI request failed after {max_retries} attempts: {e}")
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+    
+    def _detect_language(self, text: str) -> Optional[str]:
+        """Detect language of the text"""
+        try:
+            if not text or len(text.strip()) < 10:
+                return None
+            return detect(text)
         except Exception as e:
-            logger.error(f"Failed to parse Outlook message: {e}")
+            logger.warning(f"Language detection failed: {e}")
             return None
+    
+    def _validate_and_enhance(self, travel_info: TravelInquiryData, email: EmailMessage) -> TravelInquiryData:
+        """Validate and enhance extracted travel information"""
+        
+        # Validate travel dates
+        if travel_info.travel_dates:
+            try:
+                dates = travel_info.travel_dates
+                if isinstance(dates, dict) and 'start' in dates and 'end' in dates:
+                    start_date = datetime.fromisoformat(dates['start']) if isinstance(dates['start'], str) else dates['start']
+                    end_date = datetime.fromisoformat(dates['end']) if isinstance(dates['end'], str) else dates['end']
+                    
+                    # Check if dates are in the past
+                    if start_date < datetime.now():
+                        travel_info.requires_clarification = True
+                        travel_info.clarification_notes = (travel_info.clarification_notes or "") + " Travel dates appear to be in the past."
+                    
+                    # Check for reasonable trip duration
+                    duration = (end_date - start_date).days
+                    if duration < 1 or duration > 365:
+                        travel_info.requires_clarification = True
+                        travel_info.clarification_notes = (travel_info.clarification_notes or "") + f" Unusual trip duration: {duration} days."
+            except Exception as e:
+                logger.warning(f"Date validation failed: {e}")
+        
+        # Validate number of travelers
+        if travel_info.number_of_travelers:
+            if travel_info.number_of_travelers < 1 or travel_info.number_of_travelers > 100:
+                travel_info.requires_clarification = True
+                travel_info.clarification_notes = (travel_info.clarification_notes or "") + " Unusual number of travelers."
+        
+        # Check for missing critical information
+        critical_missing = []
+        if not travel_info.destinations:
+            critical_missing.append("destinations")
+        if not travel_info.travel_dates:
+            critical_missing.append("travel dates")
+        if not travel_info.number_of_travelers:
+            critical_missing.append("number of travelers")
+        
+        if critical_missing:
+            travel_info.requires_clarification = True
+            travel_info.clarification_notes = (travel_info.clarification_notes or "") + f" Missing critical information: {', '.join(critical_missing)}."
+        
+        # Adjust confidence based on completeness
+        completeness_score = self._calculate_completeness_score(travel_info)
+        travel_info.extraction_confidence = min(travel_info.extraction_confidence, completeness_score)
+        
+        return travel_info
+    
+    def _calculate_completeness_score(self, travel_info: TravelInquiryData) -> int:
+        """Calculate completeness score based on available information"""
+        score = 0
+        max_score = 100
+        
+        # Critical information (70 points)
+        if travel_info.destinations:
+            score += 25
+        if travel_info.travel_dates:
+            score += 25
+        if travel_info.number_of_travelers:
+            score += 20
+        
+        # Important information (20 points)
+        if travel_info.departure_city:
+            score += 5
+        if travel_info.budget_range:
+            score += 5
+        if travel_info.hotel_preferences:
+            score += 5
+        if travel_info.special_requirements:
+            score += 5
+        
+        # Additional information (10 points)
+        if travel_info.meal_preferences:
+            score += 2
+        if travel_info.sightseeing_activities:
+            score += 2
+        if travel_info.guide_language_preferences:
+            score += 2
+        if travel_info.visa_required is not None:
+            score += 2
+        if travel_info.flight_required is not None:
+            score += 2
+        
+        return min(score, max_score)
 
-class EmailService:
-    """Unified email service for Gmail and Outlook"""
+class ConversationManager:
+    """Manages conversation threads and updates"""
     
     def __init__(self):
-        self.gmail_service = GmailService()
-        self.outlook_service = OutlookService()
+        self.llm = ChatOpenAI(
+            model=settings.openai_model,
+            temperature=0.1,
+            openai_api_key=settings.openai_api_key
+        )
+        self._setup_update_detection_prompt()
     
-    async def get_travel_inquiries(self, source: str = "both", max_results: int = 50) -> List[EmailMessage]:
-        """Get travel inquiry emails from specified source(s)"""
-        all_messages = []
+    def _setup_update_detection_prompt(self):
+        """Setup prompt for detecting updates in conversation"""
         
-        # Gmail search query for travel-related emails
-        travel_query = 'subject:("travel" OR "trip" OR "tour" OR "vacation" OR "holiday" OR "package")'
+        system_template = """
+        You are an expert at analyzing email conversations to detect changes and updates in travel requirements.
         
+        Given a previous travel inquiry and a new email in the same conversation thread, determine:
+        1. Whether the new email contains updates to the original travel requirements
+        2. What specific changes have been made
+        3. Whether this is a clarification, modification, or addition to the original request
+        
+        Analyze the following aspects:
+        - Changes in travel dates
+        - Changes in number of travelers
+        - Addition or removal of destinations
+        - Changes in budget or preferences
+        - New requirements or special requests
+        - Clarifications or corrections to previous information
+        
+        Return a JSON response with:
+        {{
+            "has_updates": boolean,
+            "update_type": "clarification|modification|addition|cancellation",
+            "changes_detected": [list of specific changes],
+            "confidence": integer (0-100),
+            "requires_new_quote": boolean
+        }}
+        """
+        
+        human_template = """
+        Original Travel Inquiry:
+        {original_inquiry}
+        
+        New Email Content:
+        Subject: {new_subject}
+        Content: {new_content}
+        
+        Analyze if there are any updates or changes in the new email compared to the original inquiry.
+        """
+        
+        self.update_detection_prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template(system_template),
+            HumanMessagePromptTemplate.from_template(human_template)
+        ])
+    
+    async def detect_updates(self, original_inquiry: TravelInquiryData, new_email: EmailMessage) -> Dict[str, Any]:
+        """Detect updates in a conversation thread"""
         try:
-            if source in ["gmail", "both"]:
-                gmail_messages = await self.gmail_service.get_messages(
-                    query=travel_query, max_results=max_results
-                )
-                all_messages.extend(gmail_messages)
+            # Format the prompt
+            formatted_prompt = self.update_detection_prompt.format_prompt(
+                original_inquiry=original_inquiry.dict(),
+                new_subject=new_email.subject,
+                new_content=new_email.body_text or new_email.body_html or ""
+            )
             
-            if source in ["outlook", "both"]:
-                # Note: You'll need to specify user email for Outlook
-                # This should be configured based on your organization's setup
-                outlook_messages = await self.outlook_service.get_messages(
-                    user_email="travel@yourcompany.com", max_results=max_results
-                )
-                all_messages.extend(outlook_messages)
+            # Get AI response
+            response = await self.llm.agenerate([formatted_prompt.to_messages()])
+            result_text = response.generations[0][0].content
             
-            # Sort by received date (newest first)
-            all_messages.sort(key=lambda x: x.received_date, reverse=True)
+            # Parse JSON response
+            result = json.loads(result_text)
             
-            logger.info(f"Retrieved {len(all_messages)} travel inquiry emails")
-            return all_messages
+            logger.info(f"Update detection completed with {result.get('confidence', 0)}% confidence")
+            return result
             
         except Exception as e:
-            logger.error(f"Failed to retrieve travel inquiries: {e}")
-            raise EmailServiceError(f"Email retrieval failed: {e}")
+            logger.error(f"Failed to detect updates: {e}")
+            return {
+                "has_updates": False,
+                "update_type": "unknown",
+                "changes_detected": [],
+                "confidence": 0,
+                "requires_new_quote": False,
+                "error": str(e)
+            }

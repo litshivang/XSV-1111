@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+inquiries/
+logs/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+attached_assets/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pythonlibs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/*.log
+
+# Replit specific
+.upm/
+# .cache/
+.config/
+replit.nix
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Output files (keep structure but ignore contents)
+# output/*.xlsx
+# output/*.csv
+# !output/.gitkeep
+
+# Large data files
+*.zip
+*.tar.gz
+*.rar
+
+
+# DATA
+DATA
+config
+
+# Secrets and config
+config/credentials.json
+config/token.pickle
+.env
+.env.example
+# output

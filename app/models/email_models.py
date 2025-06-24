@@ -1,6 +1,8 @@
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from pydantic import Field
+from app.models.travel_models import ProcessingStatus
 
 class EmailMessage(BaseModel):
     """Email message data structure"""

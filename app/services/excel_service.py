@@ -382,4 +382,27 @@ class ExcelQuoteGenerator:
         return "Not specified"
     
     def _format_preferences(self, preferences: Dict) -> str:
-        """Format preferences dictionary for
+        """Format preferences dictionary for display in Excel."""
+        if not preferences:
+            return "Standard"
+        if isinstance(preferences, dict):
+            return "; ".join(f"{k}: {v}" for k, v in preferences.items() if v)
+        if isinstance(preferences, list):
+            return ", ".join(str(p) for p in preferences)
+        return str(preferences)
+    
+    def _apply_sheet_styling(self, ws):
+        """Apply consistent borders, font, and alignment to all cells with data in the worksheet."""
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    cell.border = thin_border
+                    cell.alignment = Alignment(vertical='center', wrap_text=True)
+                    if not cell.font.bold:
+                        cell.font = Font(size=11)
