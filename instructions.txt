@@ -1,6 +1,10 @@
 COMMAND:
 
- .\venv\Scripts\activate
+1. ENVIRONMENT:     .\venv\Scripts\activate
+2. REDIS: 
+- cd C:\Program Files\Redis
+- redis-server.exe
+- redis-cli FLUSHALL   (Clear all data)
 
 
 
