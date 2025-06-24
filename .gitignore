@@ -85,4 +85,5 @@ config/credentials.json
 config/token.pickle
 .env
 .env.example
-# output
+output
+storage
