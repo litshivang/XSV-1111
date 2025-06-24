@@ -1,0 +1,59 @@
+# Core Framework
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+
+# AI & LangChain
+langchain
+langchain-openai
+langchain-community
+openai
+tiktoken
+
+# Database
+sqlalchemy
+alembic
+psycopg2-binary
+
+# Task Queue
+celery
+redis
+
+# Email Integration
+msgraph-sdk
+google-api-python-client
+google-auth-oauthlib
+exchangelib
+
+# Data Processing
+pandas
+openpyxl
+python-multipart
+
+# Translation
+googletrans
+langdetect
+
+# Utilities
+python-dotenv
+httpx
+aiofiles
+python-jose
+passlib
+
+# Monitoring & Logging
+prometheus-client
+structlog
+sentry-sdk
+
+# Testing
+pytest
+pytest-asyncio
+pytest-mock
+httpx
+
+# Development
+black
+flake8
+mypy
