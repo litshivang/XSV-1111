@@ -73,8 +73,8 @@ class TravelAgent:
                 thread_id=message.thread_id,
                 recipient=message.sender_email,
                 subject=f"Re: {message.subject}",
-                body=("Dear Traveler,\n\nThank you for your inquiry. Please find attached your customized travel quotation.\n"
-                      "If you have any questions or need further customization, feel free to reply to this email.\n\nBest regards,\nYour Travel Agency Team"),
+                body=("Dear Wanderer,\n\nThank you for your inquiry. Please find attached your customized travel quotation.\n"
+                      "If you have any questions or need further customization, feel free to reply to this email.\n\nBest regards,\nYour Trip Maker"),
                 attachments=[quote_file]
             )
             
