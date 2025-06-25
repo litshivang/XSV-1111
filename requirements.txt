@@ -57,3 +57,7 @@ httpx
 black
 flake8
 mypy
+
+
+# EXCLUDE:
+# tensorflow, torch 

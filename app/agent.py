@@ -68,19 +68,19 @@ class TravelAgent:
             quote_file = await self.excel_generator.generate_quote(inquiry, quote_data)
             
             # Send response email with quote
-            await self.email_service.send_response(
-                message_id=message.message_id,
-                thread_id=message.thread_id,
-                recipient=message.sender_email,
-                subject=f"Re: {message.subject}",
-                body=("Dear Wanderer,\n\nThank you for your inquiry. Please find attached your customized travel quotation.\n"
-                      "If you have any questions or need further customization, feel free to reply to this email.\n\nBest regards,\nYour Trip Maker"),
-                attachments=[quote_file]
-            )
+            # await self.email_service.send_response(
+            #     message_id=message.message_id,
+            #     thread_id=message.thread_id,
+            #     recipient=message.sender_email,
+            #     subject=f"Re: {message.subject}",
+            #     body=("Dear Wanderer,\n\nThank you for your inquiry. Please find attached your customized travel quotation.\n"
+            #           "If you have any questions or need further customization, feel free to reply to this email.\n\nBest regards,\nYour Trip Maker"),
+            #     attachments=[quote_file]
+            # )
             
             # Mark as processed and read
             await self._mark_email_processed(message.message_id)
-            await self._mark_email_as_read(message)
+            # await self._mark_email_as_read(message)
             
             logger.info(f"Successfully processed email: {message.message_id}")
             return True
