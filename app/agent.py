@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 
 from app.config import settings
 from app.services.email_service import EmailService
-from app.services.ai_service import TravelInfoExtractor
-from app.services.excel_service import ExcelQuoteGenerator
+from app.services.ai_service import EnhancedTravelInfoExtractor
+from app.services.excel_service import EnhancedExcelQuoteGenerator
 from app.models.email_models import EmailMessage
 from app.models.travel_models import ProcessingStatus, TravelQuoteData
 from app.utils.logger import get_logger
@@ -19,8 +19,8 @@ class TravelAgent:
     
     def __init__(self):
         self.email_service = EmailService()
-        self.ai_extractor = TravelInfoExtractor()
-        self.excel_generator = ExcelQuoteGenerator()
+        self.ai_extractor = EnhancedTravelInfoExtractor()
+        self.excel_generator = EnhancedExcelQuoteGenerator()
         self.redis = get_redis_client()
         
     async def _is_email_processed(self, message_id: str) -> bool:
@@ -62,12 +62,12 @@ class TravelAgent:
             
             # Extract trip requirements using AI
             inquiry = await self.ai_extractor.extract_travel_info(message)
-            # Generate dummy quote data (should be replaced with real pricing logic)
-            quote_data = TravelQuoteData.create_placeholder(inquiry)
+            # Generate enhanced quote data (should be replaced with real pricing logic)
+            quote_data = TravelQuoteData.create_enhanced_placeholder(inquiry)
             # Generate Excel quote
             quote_file = await self.excel_generator.generate_quote(inquiry, quote_data)
             
-            # Send response email with quote
+            # Send response email with quote (uncomment if needed)
             # await self.email_service.send_response(
             #     message_id=message.message_id,
             #     thread_id=message.thread_id,
@@ -79,7 +79,7 @@ class TravelAgent:
             # )
             
             # Mark as processed and read
-            await self._mark_email_processed(message.message_id)
+            # await self._mark_email_processed(message.message_id)
             # await self._mark_email_as_read(message)
             
             logger.info(f"Successfully processed email: {message.message_id}")
