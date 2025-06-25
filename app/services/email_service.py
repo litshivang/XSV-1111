@@ -387,8 +387,8 @@ class EmailService:
         """Get travel inquiry emails from specified source(s)"""
         all_messages = []
         
-        # Gmail search query for travel-related emails
-        travel_query = 'subject:("travel" OR "trip" OR "tour" OR "vacation" OR "holiday" OR "package")'
+        # Remove subject filter: fetch all unread emails from sender
+        travel_query = ""  # No subject filter
         
         try:
             if source in ["gmail", "both"]:
