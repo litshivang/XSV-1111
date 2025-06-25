@@ -236,13 +236,12 @@ class GmailService:
 class OutlookService:
     def __init__(self):
         # Device Code Flow: no redirect URI or client secret required
-        self.credential = DeviceCodeCredential(
-            client_id=settings.outlook_client_id,
+        self.credential = InteractiveBrowserCredential(
+            client_id=settings.outlook_client_id,  
             tenant_id=settings.outlook_tenant_id,
             cache_persistence_options=TokenCachePersistenceOptions(
                 enabled=True,
-                name="outlook_cache",
-                allow_unencrypted_storage=True
+                name="outlook_cache"
             )
         )
         self.access_token = None
@@ -260,18 +259,16 @@ class OutlookService:
     async def get_messages(self, user_email: str = None, max_results: int = 50) -> List[EmailMessage]:
         """Retrieve email messages from Outlook"""
         try:
-            if not user_email:
-                user_email = settings.outlook_user_id
             headers = {
                 'Authorization': f'Bearer {self.access_token}',
                 'Content-Type': 'application/json'
             }
             # Use /users/{user_id}/messages for application permissions
-            url = f"https://graph.microsoft.com/v1.0/users/{user_email}/messages"
+            url = "https://graph.microsoft.com/v1.0/me/messages"
 
             params = {
                 '$top': max_results,
-                '$select': 'id,subject,from,toRecipients,receivedDateTime,body,conversationId',
+                '$select': 'id,subject,from,toRecipients,receivedDateTime,body,conversationId,isRead',
                 '$orderby': 'receivedDateTime desc'
             }
 
@@ -286,8 +283,9 @@ class OutlookService:
 
                 filtered_msgs = [
                     msg for msg in messages
-                    if not msg.get("isRead") and
-                    msg.get("from", {}).get("emailAddress", {}).get("address", "").lower() == settings.sender_email.lower()
+                    if not msg.get("isRead", False)
+                    and msg.get("from", {}).get("emailAddress", {}).get("address", "").lower()
+                        == settings.sender_email.lower()
                 ]
 
                 email_messages = []
@@ -363,7 +361,7 @@ class OutlookService:
                 'Content-Type': 'application/json'
             }
             
-            url = f"https://graph.microsoft.com/v1.0/users/{settings.sender_email}/messages/{message_id}"
+            url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}"
             data = {
                 'isRead': True
             }
@@ -415,48 +413,92 @@ class EmailService:
             logger.error(f"Failed to retrieve travel inquiries: {e}")
             raise EmailServiceError(f"Email retrieval failed: {e}")
             
+
+# SEND RESPONSE:            
+
     async def send_response(self, message_id: str, thread_id: Optional[str], 
                           recipient: str, subject: str, body: str, 
                           attachments: List[str] = None) -> bool:
         """Send response email with quote"""
-        try:
-            if message_id.startswith('gmail_'):
-                # Use Gmail API to send email with attachment
-                message = MIMEMultipart()
-                message['to'] = recipient
-                message['from'] = settings.sender_email
-                message['subject'] = subject
-                if thread_id:
-                    message.add_header('In-Reply-To', thread_id)
-                message.attach(MIMEText(body, 'plain'))
-                
-                # Attach files
-                for file_path in attachments or []:
-                    filename = os.path.basename(file_path)
-                    with open(file_path, 'rb') as f:
-                        part = MIMEBase('application', 'octet-stream')
-                        part.set_payload(f.read())
-                        encoders.encode_base64(part)
-                        part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
-                        message.attach(part)
-                
-                # Encode message
-                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-                send_body = {'raw': raw_message}
-                if thread_id:
-                    send_body['threadId'] = thread_id
-                
-                self.gmail_service.service.users().messages().send(
-                    userId='me', body=send_body
-                ).execute()
-                logger.info(f"Sent Gmail response to {recipient}")
-                return True
-            elif message_id.startswith('outlook_'):
-                # TODO: Implement Outlook send with attachment using Microsoft Graph API
-                logger.warning("Outlook send_response not implemented yet.")
-                return False
-            else:
-                raise EmailServiceError("Unknown email service")
-        except Exception as e:
-            logger.error(f"Failed to send response email: {e}")
-            return False
+
+        if message_id.startswith('gmail_'):
+            # Use Gmail API to send email with attachment
+            message = MIMEMultipart()
+            message['to'] = recipient
+            message['from'] = settings.sender_email
+            message['subject'] = subject
+            if thread_id:
+                message.add_header('In-Reply-To', thread_id)
+            message.attach(MIMEText(body, 'plain'))
+            
+            # Attach files
+            for file_path in attachments or []:
+                filename = os.path.basename(file_path)
+                with open(file_path, 'rb') as f:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(f.read())
+                    encoders.encode_base64(part)
+                    part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+                    message.attach(part)
+            
+            # Encode message
+            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            send_body = {'raw': raw_message}
+            if thread_id:
+                send_body['threadId'] = thread_id
+            
+            self.gmail_service.service.users().messages().send(
+                userId='me', body=send_body
+            ).execute()
+            logger.info(f"Sent Gmail response to {recipient}")
+            return True
+        
+        elif message_id.startswith('outlook_'):
+            # Send via Outlook Graph API
+            message_data = {
+                "message": {
+                    "subject": subject,
+                    "body": {
+                        "contentType": "Text",
+                        "content": body
+                    },
+                    "toRecipients": [
+                        {
+                            "emailAddress": {
+                                "address": recipient
+                            }
+                        }
+                    ],
+                    "attachments": []
+                },
+                "saveToSentItems": True
+            }
+
+            for file_path in attachments or []:
+                with open(file_path, "rb") as f:
+                    content_bytes = base64.b64encode(f.read()).decode()
+                    attachment = {
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "name": os.path.basename(file_path),
+                        "contentBytes": content_bytes
+                    }
+                    message_data["message"]["attachments"].append(attachment)
+
+            headers = {
+                "Authorization": f"Bearer {self.outlook_service.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://graph.microsoft.com/v1.0/me/sendMail",
+                    headers=headers,
+                    json=message_data
+                )
+                response.raise_for_status()
+
+            logger.info(f"Sent Outlook response to {recipient}")
+            return True
+
+        else:
+            raise EmailServiceError("Unknown email service")

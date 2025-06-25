@@ -38,10 +38,7 @@ class Settings(BaseSettings):
     
     # Email Integration - Outlook
     outlook_client_id: str = Field(env="OUTLOOK_CLIENT_ID")
-    outlook_client_secret: str = Field(env="OUTLOOK_CLIENT_SECRET")
     outlook_tenant_id: str = Field(env="OUTLOOK_TENANT_ID")
-    outlook_user_id: EmailStr = Field(env="OUTLOOK_USER_ID")
-
     
     # File Storage
     file_storage_path: str = Field(default="./storage", env="FILE_STORAGE_PATH")
