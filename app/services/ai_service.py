@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from typing import List, Dict, Any, Optional, Tuple
@@ -12,6 +11,7 @@ from langchain.schema import BaseOutputParser
 from langchain.output_parsers import PydanticOutputParser
 from langdetect import detect
 from googletrans import Translator
+from dateutil import parser as date_parser
 
 from app.config import settings
 from app.models.travel_models import TravelInquiryData, InquiryComplexity, DestinationDetail, TravelerInfo
@@ -174,8 +174,37 @@ class EnhancedTravelInfoExtractor:
             # Get AI response with retries
             response = await self._get_ai_response_with_retries(formatted_prompt.to_messages())
             
-            # Parse response
-            travel_info = self.output_parser.parse(response.text)
+            # Clean LLM output
+            raw_json = response.text.strip()
+            # Extract the first JSON object from the output, even if surrounded by text/code blocks
+            json_match = re.search(r'({[\s\S]*})', raw_json)
+            if not json_match:
+                logger.error(f"LLM did not return valid JSON: {raw_json}")
+                return self._create_fallback_response(email, "Extraction failed: LLM output is not valid JSON")
+            raw_json = json_match.group(1)
+            data = json.loads(raw_json)
+
+            # Fix: Set default for number_of_quote_options if None or missing
+            if (data or {}).get("number_of_quote_options") is None:
+                data["number_of_quote_options"] = 1
+
+            # Fix: Set default for urgent_request if None or missing
+            if (data or {}).get("urgent_request") is None:
+                data["urgent_request"] = False
+
+            # (Optional) Normalize travel_dates here as well if needed
+            if isinstance((data or {}).get("travel_dates"), dict):
+                def _normalize_date(date_str):
+                    try:
+                        return date_parser.parse(date_str, fuzzy=True).date().isoformat()
+                    except Exception:
+                        return date_str
+                for key in ['start', 'end', 'start_date', 'end_date']:
+                    if key in (data["travel_dates"] or {}) and data["travel_dates"][key]:
+                        data["travel_dates"][key] = _normalize_date(data["travel_dates"][key])
+
+            # Now parse with Pydantic
+            travel_info = self.output_parser.parse(json.dumps(data))
             
             # Post-process and validate
             travel_info = self._post_process_extraction(travel_info, email, content)
@@ -202,6 +231,21 @@ class EnhancedTravelInfoExtractor:
     def _post_process_extraction(self, travel_info: TravelInquiryData, email: EmailMessage, original_content: str) -> TravelInquiryData:
         """Post-process extracted information for accuracy"""
         
+        # --- Fix 1: Normalize travel_dates to ISO format ---
+        def _normalize_date(date_str):
+            try:
+                return date_parser.parse(date_str, fuzzy=True).date().isoformat()
+            except Exception:
+                return date_str  # fallback to original if parsing fails
+        if isinstance(travel_info.travel_dates, dict):
+            for key in ['start', 'end', 'start_date', 'end_date']:
+                if key in travel_info.travel_dates and travel_info.travel_dates[key]:
+                    travel_info.travel_dates[key] = _normalize_date(travel_info.travel_dates[key])
+
+        # --- Fix 2: Set default for number_of_quote_options if None ---
+        if getattr(travel_info, 'number_of_quote_options', None) is None:
+            travel_info.number_of_quote_options = 1
+
         # Determine inquiry complexity if not set
         if not travel_info.inquiry_complexity:
             travel_info.inquiry_complexity = self._determine_complexity(travel_info, original_content)
@@ -223,8 +267,8 @@ class EnhancedTravelInfoExtractor:
     def _determine_complexity(self, travel_info: TravelInquiryData, content: str) -> InquiryComplexity:
         """Determine if inquiry is simple or complex"""
         complexity_indicators = [
-            len(travel_info.destinations) > 1,
-            len(travel_info.destination_details) > 0,
+            len(travel_info.destinations or []) > 1,
+            len(travel_info.destination_details or []) > 0,
             "each destination" in content.lower(),
             "per location" in content.lower(),
             "different" in content.lower() and ("hotel" in content.lower() or "meal" in content.lower()),
@@ -313,8 +357,8 @@ class EnhancedTravelInfoExtractor:
             for match in matches:
                 if isinstance(match, tuple):
                     match = match[0]
-                if match and match not in travel_info.global_activities:
-                    travel_info.global_activities.append(match.title())
+                if match and match not in (travel_info.global_activities or []):
+                    (travel_info.global_activities or []).append(match.title())
         
         return travel_info
     
@@ -329,13 +373,13 @@ class EnhancedTravelInfoExtractor:
         # Validate travel dates
         if travel_info.travel_dates:
             try:
-                start_str = travel_info.travel_dates.get('start', '')
-                end_str = travel_info.travel_dates.get('end', '')
+                start_str = (travel_info.travel_dates or {}).get('start', '')
+                end_str = (travel_info.travel_dates or {}).get('end', '')
                 if start_str and end_str:
                     start_date = datetime.fromisoformat(start_str) if isinstance(start_str, str) else start_str
                     end_date = datetime.fromisoformat(end_str) if isinstance(end_str, str) else end_str
                     
-                    duration_days = (end_date - start_date).days + 1
+                    duration_days = ((end_date or 0) - (start_date or 0)).days + 1
                     duration_nights = duration_days - 1
                     
                     travel_info.duration = {
@@ -347,11 +391,11 @@ class EnhancedTravelInfoExtractor:
         
         # Set requires_clarification based on missing critical info
         critical_missing = []
-        if not travel_info.destinations:
+        if not (travel_info.destinations or []):
             critical_missing.append("destinations")
         if not travel_info.travel_dates:
             critical_missing.append("travel dates")
-        if not travel_info.traveler_info.total:
+        if not (travel_info.traveler_info.total or 0):
             critical_missing.append("number of travelers")
         
         if critical_missing:
@@ -365,7 +409,7 @@ class EnhancedTravelInfoExtractor:
         score = 0
         
         # Critical information (60 points)
-        if travel_info.destinations:
+        if travel_info.destinations and len(travel_info.destinations or []) > 0:
             score += 20
         if travel_info.travel_dates:
             score += 20
@@ -375,21 +419,21 @@ class EnhancedTravelInfoExtractor:
         # Important information (25 points)
         if travel_info.budget_per_person:
             score += 8
-        if travel_info.global_hotel_preferences or travel_info.destination_details:
+        if travel_info.global_hotel_preferences or (travel_info.destination_details and any((d.hotel_preferences or {}) for d in (travel_info.destination_details or []))):
             score += 8
         if travel_info.departure_city:
             score += 5
-        if travel_info.global_activities or any(d.activities for d in travel_info.destination_details):
+        if travel_info.global_activities or (travel_info.destination_details and any((d.activities or []) for d in (travel_info.destination_details or []))):
             score += 4
         
         # Additional details (15 points)
-        if travel_info.global_meal_preferences or any(d.meal_preferences for d in travel_info.destination_details):
+        if travel_info.global_meal_preferences or (travel_info.destination_details and any((d.meal_preferences or []) for d in (travel_info.destination_details or []))):
             score += 3
         if travel_info.visa_assistance is not None:
             score += 3
         if travel_info.accessibility_requirements:
             score += 3
-        if travel_info.number_of_quote_options > 1:
+        if (travel_info.number_of_quote_options or 1) > 1:
             score += 3
         if travel_info.guide_language_preferences:
             score += 3
@@ -400,17 +444,17 @@ class EnhancedTravelInfoExtractor:
         """List key information that was successfully extracted"""
         extracted = []
         
-        if travel_info.destinations:
-            extracted.append(f"Destinations: {', '.join(travel_info.destinations)}")
+        if travel_info.destinations and len(travel_info.destinations or []) > 0:
+            extracted.append(f"Destinations: {', '.join(travel_info.destinations or [])}")
         if travel_info.traveler_info.total:
             extracted.append(f"Travelers: {travel_info.traveler_info.total}")
         if travel_info.budget_per_person:
             extracted.append(f"Budget: ₹{travel_info.budget_per_person}/person")
         if travel_info.travel_dates:
             extracted.append("Travel dates")
-        if travel_info.global_activities or any(d.activities for d in travel_info.destination_details):
+        if travel_info.global_activities or (travel_info.destination_details and any((d.activities or []) for d in (travel_info.destination_details or []))):
             extracted.append("Activities")
-        if travel_info.number_of_quote_options > 1:
+        if (travel_info.number_of_quote_options or 1) > 1:
             extracted.append(f"Quote options: {travel_info.number_of_quote_options}")
         
         return extracted

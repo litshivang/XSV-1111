@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
@@ -18,12 +17,12 @@ class DestinationDetail(BaseModel):
     """Detailed information for a specific destination"""
     destination_name: str
     nights: Optional[int] = None
-    hotel_preferences: Dict[str, Any] = Field(default_factory=dict)
-    meal_preferences: List[str] = Field(default_factory=list)
-    activities: List[str] = Field(default_factory=list)
+    hotel_preferences: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    meal_preferences: Optional[List[str]] = Field(default_factory=list)
+    activities: Optional[List[str]] = Field(default_factory=list)
     transportation: Optional[str] = None
     guide_requirements: Optional[str] = None
-    special_notes: List[str] = Field(default_factory=list)
+    special_notes: Optional[List[str]] = Field(default_factory=list)
 
 class TravelerInfo(BaseModel):
     """Detailed traveler information"""
@@ -33,7 +32,7 @@ class TravelerInfo(BaseModel):
     couples: Optional[int] = None
     singles: Optional[int] = None
     visa_required_count: Optional[int] = None
-    special_requirements: List[str] = Field(default_factory=list)
+    special_requirements: Optional[List[str]] = Field(default_factory=list)
 
 class TravelInquiryData(BaseModel):
     """Enhanced structured travel inquiry data extracted from emails"""
@@ -45,8 +44,8 @@ class TravelInquiryData(BaseModel):
     traveler_info: TravelerInfo = Field(default_factory=TravelerInfo)
     
     # Enhanced Destination Information
-    destinations: List[str] = Field(default_factory=list)
-    destination_details: List[DestinationDetail] = Field(default_factory=list)
+    destinations: Optional[List[str]] = Field(default_factory=list)
+    destination_details: Optional[List[DestinationDetail]] = Field(default_factory=list)
     
     # Travel Logistics
     travel_dates: Optional[Dict[str, Any]] = None
@@ -54,9 +53,9 @@ class TravelInquiryData(BaseModel):
     departure_city: Optional[str] = None
     
     # Global Preferences (for simple inquiries)
-    global_hotel_preferences: Dict[str, Any] = Field(default_factory=dict)
-    global_meal_preferences: List[str] = Field(default_factory=list)
-    global_activities: List[str] = Field(default_factory=list)
+    global_hotel_preferences: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    global_meal_preferences: Optional[List[str]] = Field(default_factory=list)
+    global_activities: Optional[List[str]] = Field(default_factory=list)
     
     # Services Required
     visa_assistance: Optional[bool] = None
@@ -65,13 +64,13 @@ class TravelInquiryData(BaseModel):
     airport_transfers: Optional[bool] = None
     
     # Guide Requirements
-    guide_language_preferences: List[str] = Field(default_factory=list)
-    guide_required_destinations: List[str] = Field(default_factory=list)
+    guide_language_preferences: Optional[List[str]] = Field(default_factory=list)
+    guide_required_destinations: Optional[List[str]] = Field(default_factory=list)
     
     # Budget Information
     budget_per_person: Optional[float] = None
     total_budget: Optional[float] = None
-    budget_currency: str = "INR"
+    budget_currency: Optional[str] = Field(default="INR")
     
     # Quote Requirements
     number_of_quote_options: int = 1
@@ -79,16 +78,16 @@ class TravelInquiryData(BaseModel):
     urgent_request: bool = False
     
     # Special Requirements
-    accessibility_requirements: List[str] = Field(default_factory=list)
-    dietary_restrictions: List[str] = Field(default_factory=list)
-    special_occasions: List[str] = Field(default_factory=list)
+    accessibility_requirements: Optional[List[str]] = Field(default_factory=list)
+    dietary_restrictions: Optional[List[str]] = Field(default_factory=list)
+    special_occasions: Optional[List[str]] = Field(default_factory=list)
     
     # Processing Metadata
     extraction_confidence: int = Field(default=0, ge=0, le=100)
     requires_clarification: bool = Field(default=False)
     clarification_notes: Optional[str] = None
     original_language: Optional[str] = None
-    key_information_extracted: List[str] = Field(default_factory=list)
+    key_information_extracted: Optional[List[str]] = Field(default_factory=list)
     
     @field_validator('travel_dates')
     @classmethod
@@ -165,7 +164,7 @@ class TravelQuoteData(BaseModel):
             "duration": inquiry.duration or {"total_days": 8, "total_nights": 7},
             "departure_city": inquiry.departure_city or "To be decided",
             "budget_per_person": inquiry.budget_per_person,
-            "special_requirements": inquiry.accessibility_requirements + inquiry.dietary_restrictions
+            "special_requirements": (inquiry.accessibility_requirements or []) + (inquiry.dietary_restrictions or [])
         }
         
         # Generate pricing based on complexity
@@ -208,7 +207,7 @@ class TravelQuoteData(BaseModel):
         for i, (multiplier, name) in enumerate(zip(base_multipliers, option_names)):
             option = {"package_name": name, "destinations": []}
             
-            for dest_detail in inquiry.destination_details:
+            for dest_detail in (inquiry.destination_details or []):
                 dest_pricing = {
                     "destination": dest_detail.destination_name,
                     "nights": dest_detail.nights or 3,
@@ -266,7 +265,7 @@ class TravelQuoteData(BaseModel):
     def _generate_destination_breakdown(inquiry: 'TravelInquiryData') -> List[Dict[str, Any]]:
         """Generate detailed breakdown by destination"""
         breakdown = []
-        for dest_detail in inquiry.destination_details:
+        for dest_detail in (inquiry.destination_details or []):
             dest_info = {
                 "destination": dest_detail.destination_name,
                 "duration": f"{dest_detail.nights} nights" if dest_detail.nights else "TBD",
@@ -287,32 +286,32 @@ class TravelQuoteData(BaseModel):
         
         if inquiry.inquiry_complexity == InquiryComplexity.COMPLEX:
             day_counter = 1
-            for dest_detail in inquiry.destination_details:
+            for dest_detail in (inquiry.destination_details or []):
                 nights = dest_detail.nights or 3
                 for night in range(nights):
                     day_info = {
                         "day": day_counter,
                         "destination": dest_detail.destination_name,
-                        "activities": "; ".join(dest_detail.activities) if dest_detail.activities else "Leisure and local exploration",
-                        "meals": "; ".join(dest_detail.meal_preferences) if dest_detail.meal_preferences else "As per package",
-                        "accommodation": f"{dest_detail.hotel_preferences.get('category', 'Standard')} hotel",
+                        "activities": "; ".join(dest_detail.activities or []) if dest_detail.activities else "Leisure and local exploration",
+                        "meals": "; ".join(dest_detail.meal_preferences or []) if dest_detail.meal_preferences else "As per package",
+                        "accommodation": f"{(dest_detail.hotel_preferences or {}).get('category', 'Standard')} hotel",
                         "transportation": dest_detail.transportation or "As per itinerary",
-                        "special_notes": dest_detail.special_notes or ""
+                        "special_notes": ", ".join(dest_detail.special_notes or []) if dest_detail.special_notes else ""
                     }
                     itinerary.append(day_info)
                     day_counter += 1
         else:
             # Simple itinerary
             duration = inquiry.duration or {"total_days": 7}
-            total_days = duration.get("total_days", 7)
+            total_days = (duration or {}).get("total_days", 7)
             
             for day in range(1, total_days + 1):
                 day_info = {
                     "day": day,
-                    "destination": inquiry.destinations[0] if inquiry.destinations else "Destination",
-                    "activities": "; ".join(inquiry.global_activities) if inquiry.global_activities else "Sightseeing and leisure",
-                    "meals": "; ".join(inquiry.global_meal_preferences) if inquiry.global_meal_preferences else "As per package",
-                    "accommodation": f"{inquiry.global_hotel_preferences.get('category', 'Standard')} hotel",
+                    "destination": (inquiry.destinations or ["Destination"])[0] if inquiry.destinations else "Destination",
+                    "activities": "; ".join(inquiry.global_activities or []) if inquiry.global_activities else "Sightseeing and leisure",
+                    "meals": "; ".join(inquiry.global_meal_preferences or []) if inquiry.global_meal_preferences else "As per package",
+                    "accommodation": f"{(inquiry.global_hotel_preferences or {}).get('category', 'Standard')} hotel",
                     "transportation": "As per itinerary",
                     "special_notes": ""
                 }
@@ -337,7 +336,7 @@ class TravelQuoteData(BaseModel):
         ]
         
         # Add specific inclusions based on inquiry
-        if inquiry.global_meal_preferences or any(d.meal_preferences for d in inquiry.destination_details):
+        if inquiry.global_meal_preferences or any((d.meal_preferences or []) for d in (inquiry.destination_details or [])):
             base_inclusions.insert(1, "Meals as specified in itinerary")
         
         if inquiry.visa_assistance:

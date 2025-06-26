@@ -1,4 +1,3 @@
-
 import os
 import logging
 from typing import Dict, Any, List, Optional
@@ -129,9 +128,9 @@ class EnhancedExcelQuoteGenerator:
         row += 2
         
         travel_overview = [
-            ("Destinations:", ", ".join(inquiry.destinations) if inquiry.destinations else "Not specified"),
+            ("Destinations:", ", ".join(inquiry.destinations or []) if inquiry.destinations else "Not specified"),
             ("Travel Dates:", self._format_travel_dates(inquiry.travel_dates)),
-            ("Total Duration:", f"{inquiry.duration.get('total_days', 'Not specified')} days, {inquiry.duration.get('total_nights', 'Not specified')} nights" if inquiry.duration else "Not specified"),
+            ("Total Duration:", f"{(inquiry.duration or {}).get('total_days', 'Not specified')} days, {(inquiry.duration or {}).get('total_nights', 'Not specified')} nights" if inquiry.duration else "Not specified"),
             ("Departure City:", inquiry.departure_city or "Not specified"),
             ("Budget per Person:", f"₹{inquiry.budget_per_person:,.2f}" if inquiry.budget_per_person else "Not specified"),
         ]
@@ -153,7 +152,7 @@ class EnhancedExcelQuoteGenerator:
             ("Travel Insurance:", "Yes" if inquiry.insurance_required else "No"),
             ("Flight Booking:", "Yes" if inquiry.flight_required else "No"),
             ("Airport Transfers:", "Yes" if inquiry.airport_transfers else "No"),
-            ("Guide Services:", ", ".join(inquiry.guide_language_preferences) if inquiry.guide_language_preferences else "As required"),
+            ("Guide Services:", ", ".join(inquiry.guide_language_preferences or []) if inquiry.guide_language_preferences else "As required"),
         ]
         
         for label, value in services:
@@ -171,13 +170,13 @@ class EnhancedExcelQuoteGenerator:
             
             if inquiry.accessibility_requirements:
                 ws[f'A{row}'] = "Accessibility:"
-                ws[f'B{row}'] = ", ".join(inquiry.accessibility_requirements)
+                ws[f'B{row}'] = ", ".join(inquiry.accessibility_requirements or [])
                 ws[f'A{row}'].font = Font(bold=True)
                 row += 1
             
             if inquiry.dietary_restrictions:
                 ws[f'A{row}'] = "Dietary:"
-                ws[f'B{row}'] = ", ".join(inquiry.dietary_restrictions)
+                ws[f'B{row}'] = ", ".join(inquiry.dietary_restrictions or [])
                 ws[f'A{row}'].font = Font(bold=True)
                 row += 1
         
@@ -196,7 +195,7 @@ class EnhancedExcelQuoteGenerator:
         
         row = 3
         
-        for i, dest_detail in enumerate(inquiry.destination_details, 1):
+        for i, dest_detail in enumerate(inquiry.destination_details or [], 1):
             # Destination header
             ws.merge_cells(f'A{row}:G{row}')
             ws[f'A{row}'] = f"DESTINATION {i}: {dest_detail.destination_name.upper()}"
@@ -207,12 +206,12 @@ class EnhancedExcelQuoteGenerator:
             # Destination details
             dest_info = [
                 ("Duration:", f"{dest_detail.nights} nights" if dest_detail.nights else "Not specified"),
-                ("Accommodation:", self._format_preferences(dest_detail.hotel_preferences)),
-                ("Meal Preferences:", ", ".join(dest_detail.meal_preferences) if dest_detail.meal_preferences else "Standard"),
-                ("Activities:", ", ".join(dest_detail.activities) if dest_detail.activities else "As per itinerary"),
+                ("Accommodation:", self._format_preferences(dest_detail.hotel_preferences or {})),
+                ("Meal Preferences:", ", ".join(dest_detail.meal_preferences or []) if dest_detail.meal_preferences else "Standard"),
+                ("Activities:", ", ".join(dest_detail.activities or []) if dest_detail.activities else "As per itinerary"),
                 ("Transportation:", dest_detail.transportation or "As per package"),
                 ("Guide Requirements:", dest_detail.guide_requirements or "Not specified"),
-                ("Special Notes:", dest_detail.special_notes or "None"),
+                ("Special Notes:", ", ".join(dest_detail.special_notes or []) if dest_detail.special_notes else "None"),
             ]
             
             for label, value in dest_info:
@@ -329,9 +328,9 @@ class EnhancedExcelQuoteGenerator:
         
         details = [
             ("Number of Travelers:", inquiry.traveler_info.total or "Not specified"),
-            ("Destinations:", ", ".join(inquiry.destinations) if inquiry.destinations else "Not specified"),
+            ("Destinations:", ", ".join(inquiry.destinations or []) if inquiry.destinations else "Not specified"),
             ("Travel Dates:", self._format_travel_dates(inquiry.travel_dates)),
-            ("Duration:", f"{inquiry.duration.get('total_days', 'Not specified')} days, {inquiry.duration.get('total_nights', 'Not specified')} nights" if inquiry.duration else "Not specified"),
+            ("Duration:", f"{(inquiry.duration or {}).get('total_days', 'Not specified')} days, {(inquiry.duration or {}).get('total_nights', 'Not specified')} nights" if inquiry.duration else "Not specified"),
             ("Departure City:", inquiry.departure_city or "Not specified"),
             ("Budget per Person:", f"₹{inquiry.budget_per_person:,.2f}" if inquiry.budget_per_person else "Not specified"),
         ]
@@ -349,10 +348,10 @@ class EnhancedExcelQuoteGenerator:
         row += 2
         
         preferences = [
-            ("Hotel Preferences:", self._format_preferences(inquiry.global_hotel_preferences)),
-            ("Meal Preferences:", ", ".join(inquiry.global_meal_preferences) if inquiry.global_meal_preferences else "Standard"),
-            ("Activities:", ", ".join(inquiry.global_activities) if inquiry.global_activities else "As per itinerary"),
-            ("Guide Language:", ", ".join(inquiry.guide_language_preferences) if inquiry.guide_language_preferences else "English"),
+            ("Hotel Preferences:", self._format_preferences(inquiry.global_hotel_preferences or {})),
+            ("Meal Preferences:", ", ".join(inquiry.global_meal_preferences or []) if inquiry.global_meal_preferences else "Standard"),
+            ("Activities:", ", ".join(inquiry.global_activities or []) if inquiry.global_activities else "As per itinerary"),
+            ("Guide Language:", ", ".join(inquiry.guide_language_preferences or []) if inquiry.guide_language_preferences else "English"),
             ("Special Requirements:", self._format_special_requirements(inquiry)),
         ]
         
@@ -547,7 +546,7 @@ class EnhancedExcelQuoteGenerator:
             return "Standard"
         if isinstance(preferences, dict):
             formatted = []
-            for k, v in preferences.items():
+            for k, v in (preferences or {}).items():
                 if v:
                     formatted.append(f"{k.title()}: {v}")
             return "; ".join(formatted) if formatted else "Standard"
@@ -557,9 +556,9 @@ class EnhancedExcelQuoteGenerator:
         """Format all special requirements"""
         requirements = []
         if inquiry.accessibility_requirements:
-            requirements.extend(inquiry.accessibility_requirements)
+            requirements.extend(inquiry.accessibility_requirements or [])
         if inquiry.dietary_restrictions:
-            requirements.extend(inquiry.dietary_restrictions)
+            requirements.extend(inquiry.dietary_restrictions or [])
         return ", ".join(requirements) if requirements else "None"
     
     def _apply_sheet_styling(self, ws):
