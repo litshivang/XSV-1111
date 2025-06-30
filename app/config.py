@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     
     # AI Services
     openai_api_key: str = Field(env="OPENAI_API_KEY")
-    openai_model: str = Field(default="gpt-4-1106-preview", env="OPENAI_MODEL")
+    openai_model: str = Field(default="gpt-4o", env="OPENAI_MODEL")
     ai_temperature: float = Field(default=0.1, env="AI_TEMPERATURE")
     
     # Email Integration - Gmail

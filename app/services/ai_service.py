@@ -12,6 +12,9 @@ from langchain.output_parsers import PydanticOutputParser
 from langdetect import detect
 from googletrans import Translator
 from dateutil import parser as date_parser
+import tiktoken  
+import os
+import time
 
 from app.config import settings
 from app.models.travel_models import TravelInquiryData, InquiryComplexity, DestinationDetail, TravelerInfo
@@ -21,8 +24,121 @@ from app.utils.exceptions import AIServiceError
 
 logger = get_logger(__name__)
 
+# Set up a dedicated logger for the agent pipeline
+pipeline_log_path = os.path.join("logs", "agent_pipeline.log")
+os.makedirs("logs", exist_ok=True)
+pipeline_logger = logging.getLogger("agent_pipeline")
+pipeline_logger.setLevel(logging.INFO)
+if not pipeline_logger.handlers:
+    file_handler = logging.FileHandler(pipeline_log_path, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    file_handler.setFormatter(formatter)
+    pipeline_logger.addHandler(file_handler)
+
 class EnhancedTravelInfoExtractor:
     """Enhanced AI service for extracting travel information from emails with high accuracy"""
+    
+    # Move templates to class attributes
+    system_template = """
+    You are an EXPERT AI assistant specializing in extracting structured travel information from unstructured email inquiries with 100%+ accuracy.
+    You work for a premium B2B travel agency and must extract EVERY detail mentioned in customer emails.
+
+    CRITICAL GUIDELINES FOR 100% ACCURACY:
+    1. EXTRACT EVERYTHING: Every number, location, preference, date, requirement mentioned
+    2. DIFFERENTIATE INQUIRY TYPES:
+       - SIMPLE: General requirements for entire trip (same preferences for all destinations)
+       - COMPLEX: Specific requirements per destination (different preferences per location)
+    3. BE PRECISE: Extract exact values, don't approximate or assume
+    4. CAPTURE NUANCES: Special requests, accessibility needs, dietary requirements
+    5. MAINTAIN CONTEXT: Understand relationships between information pieces
+
+    EXTRACTION TARGETS:
+    
+    TRAVELER INFORMATION:
+    - Total number of travelers (exact count)
+    - Breakdown: adults, children, couples, singles
+    - Visa requirements (who needs visa assistance)
+    - Special needs (wheelchair access, medical requirements)
+
+    DESTINATIONS & DURATION:
+    - All destinations mentioned
+    - Duration per destination (nights/days)
+    - Total trip duration
+    - Departure city
+
+    ACCOMMODATION PREFERENCES:
+    - For SIMPLE inquiries: Global hotel preferences
+    - For COMPLEX inquiries: Hotel preferences per destination
+    - Star rating, hotel type (resort, villa, etc.)
+    - Room requirements (twin sharing, single rooms)
+
+    MEAL PREFERENCES:
+    - For SIMPLE inquiries: Global meal preferences
+    - For COMPLEX inquiries: Meal preferences per destination
+    - Dietary restrictions (veg, non-veg, specific diets)
+    - Meal types (all meals, breakfast only, etc.)
+
+    ACTIVITIES & SIGHTSEEING:
+    - Specific attractions mentioned (e.g., "Kintamani sunrise", "Eiffel Tower")
+    - Activity types (beach hopping, temple visits, tours)
+    - Per destination activities for complex inquiries
+
+    SERVICES REQUIRED:
+    - Visa assistance needed (and for how many travelers)
+    - Travel insurance requirements
+    - Flight booking needs
+    - Airport transfers
+    - Transportation preferences (private car, hotel shuttle, Eurail)
+
+    GUIDE REQUIREMENTS:
+    - Language preferences (English speaking guide)
+    - Specific destinations requiring guides
+    - Guide type preferences
+
+    BUDGET INFORMATION:
+    - Budget per person (extract exact amounts: ₹60000, ₹50000)
+    - Total budget if mentioned
+    - Currency (INR, USD, EUR)
+
+    QUOTE REQUIREMENTS:
+    - Number of quote options needed ("2 package options", "two quotes")
+    - Specific quote variations requested
+    - Deadline urgency ("ASAP", "by EOD")
+
+    SPECIAL REQUIREMENTS:
+    - Accessibility needs (wheelchair access)
+    - Special occasions (honeymoon, anniversary)
+    - Unique requests
+
+    CRITICAL EXTRACTION RULES:
+    1. For COMPLEX inquiries, create separate DestinationDetail entries for each location
+    2. Extract location-specific preferences accurately
+    3. Differentiate between global and destination-specific requirements
+    4. Capture exact budget figures with currency
+    5. Note specific activities and attractions by name
+    6. Record transportation preferences per destination
+    7. Extract visa requirements with exact counts
+
+    {format_instructions}
+    """
+    human_template = """
+    TRAVEL INQUIRY ANALYSIS:
+    
+    Email Subject: {subject}
+    Email Content: {content}
+    Sender: {sender}
+    Language: {language}
+    
+    EXTRACTION TASK:
+    1. First, determine if this is a SIMPLE or COMPLEX inquiry
+    2. Extract ALL information mentioned in the email
+    3. For complex inquiries, create destination-specific details
+    4. Capture exact numbers, amounts, and specific requirements
+    5. Note any missing critical information for clarification
+    
+    Provide extraction confidence score based on completeness and clarity.
+    """
     
     def __init__(self):
         self.llm = ChatOpenAI(
@@ -37,109 +153,8 @@ class EnhancedTravelInfoExtractor:
     def _setup_enhanced_prompts(self):
         """Setup enhanced LangChain prompts for high-accuracy travel information extraction"""
         
-        system_template = """
-        You are an EXPERT AI assistant specializing in extracting structured travel information from unstructured email inquiries with 95%+ accuracy.
-        You work for a premium B2B travel agency and must extract EVERY detail mentioned in customer emails.
-
-        CRITICAL GUIDELINES FOR 95% ACCURACY:
-        1. EXTRACT EVERYTHING: Every number, location, preference, date, requirement mentioned
-        2. DIFFERENTIATE INQUIRY TYPES:
-           - SIMPLE: General requirements for entire trip (same preferences for all destinations)
-           - COMPLEX: Specific requirements per destination (different preferences per location)
-        3. BE PRECISE: Extract exact values, don't approximate or assume
-        4. CAPTURE NUANCES: Special requests, accessibility needs, dietary requirements
-        5. MAINTAIN CONTEXT: Understand relationships between information pieces
-
-        EXTRACTION TARGETS:
-        
-        TRAVELER INFORMATION:
-        - Total number of travelers (exact count)
-        - Breakdown: adults, children, couples, singles
-        - Visa requirements (who needs visa assistance)
-        - Special needs (wheelchair access, medical requirements)
-
-        DESTINATIONS & DURATION:
-        - All destinations mentioned
-        - Duration per destination (nights/days)
-        - Total trip duration
-        - Departure city
-
-        ACCOMMODATION PREFERENCES:
-        - For SIMPLE inquiries: Global hotel preferences
-        - For COMPLEX inquiries: Hotel preferences per destination
-        - Star rating, hotel type (resort, villa, etc.)
-        - Room requirements (twin sharing, single rooms)
-
-        MEAL PREFERENCES:
-        - For SIMPLE inquiries: Global meal preferences
-        - For COMPLEX inquiries: Meal preferences per destination
-        - Dietary restrictions (veg, non-veg, specific diets)
-        - Meal types (all meals, breakfast only, etc.)
-
-        ACTIVITIES & SIGHTSEEING:
-        - Specific attractions mentioned (e.g., "Kintamani sunrise", "Eiffel Tower")
-        - Activity types (beach hopping, temple visits, tours)
-        - Per destination activities for complex inquiries
-
-        SERVICES REQUIRED:
-        - Visa assistance needed (and for how many travelers)
-        - Travel insurance requirements
-        - Flight booking needs
-        - Airport transfers
-        - Transportation preferences (private car, hotel shuttle, Eurail)
-
-        GUIDE REQUIREMENTS:
-        - Language preferences (English speaking guide)
-        - Specific destinations requiring guides
-        - Guide type preferences
-
-        BUDGET INFORMATION:
-        - Budget per person (extract exact amounts: ₹60000, ₹50000)
-        - Total budget if mentioned
-        - Currency (INR, USD, EUR)
-
-        QUOTE REQUIREMENTS:
-        - Number of quote options needed ("2 package options", "two quotes")
-        - Specific quote variations requested
-        - Deadline urgency ("ASAP", "by EOD")
-
-        SPECIAL REQUIREMENTS:
-        - Accessibility needs (wheelchair access)
-        - Special occasions (honeymoon, anniversary)
-        - Unique requests
-
-        CRITICAL EXTRACTION RULES:
-        1. For COMPLEX inquiries, create separate DestinationDetail entries for each location
-        2. Extract location-specific preferences accurately
-        3. Differentiate between global and destination-specific requirements
-        4. Capture exact budget figures with currency
-        5. Note specific activities and attractions by name
-        6. Record transportation preferences per destination
-        7. Extract visa requirements with exact counts
-
-        {format_instructions}
-        """
-        
-        human_template = """
-        TRAVEL INQUIRY ANALYSIS:
-        
-        Email Subject: {subject}
-        Email Content: {content}
-        Sender: {sender}
-        Language: {language}
-        
-        EXTRACTION TASK:
-        1. First, determine if this is a SIMPLE or COMPLEX inquiry
-        2. Extract ALL information mentioned in the email
-        3. For complex inquiries, create destination-specific details
-        4. Capture exact numbers, amounts, and specific requirements
-        5. Note any missing critical information for clarification
-        
-        Provide extraction confidence score based on completeness and clarity.
-        """
-        
-        system_message = SystemMessagePromptTemplate.from_template(system_template)
-        human_message = HumanMessagePromptTemplate.from_template(human_template)
+        system_message = SystemMessagePromptTemplate.from_template(self.system_template)
+        human_message = HumanMessagePromptTemplate.from_template(self.human_template)
         
         self.extraction_prompt = ChatPromptTemplate.from_messages([
             system_message,
@@ -148,7 +163,10 @@ class EnhancedTravelInfoExtractor:
     
     async def extract_travel_info(self, email: EmailMessage) -> TravelInquiryData:
         """Extract travel information with enhanced accuracy"""
+        start_time = time.monotonic()
         try:
+            pipeline_logger.info("=== [STEP] Starting agent for new email ===")
+            pipeline_logger.info(f"[STEP] Received email: subject='{email.subject}', sender='{email.sender_email}'")
             # Detect language and translate if necessary
             content = email.body_text or email.body_html or ""
             language = self._detect_language(content)
@@ -158,9 +176,9 @@ class EnhancedTravelInfoExtractor:
             if language and language != 'en':
                 try:
                     translated_content = self.translator.translate(content, dest='en').text
-                    logger.info(f"Translated email from {language} to English")
+                    pipeline_logger.info(f"[STEP] Translated email from {language} to English")
                 except Exception as e:
-                    logger.warning(f"Translation failed: {e}, using original content")
+                    pipeline_logger.warning(f"[STEP] Translation failed: {e}, using original content")
             
             # Prepare enhanced prompt
             formatted_prompt = self.extraction_prompt.format_prompt(
@@ -171,28 +189,74 @@ class EnhancedTravelInfoExtractor:
                 format_instructions=self.output_parser.get_format_instructions()
             )
             
-            # Get AI response with retries
-            response = await self._get_ai_response_with_retries(formatted_prompt.to_messages())
+            # Log the full prompt being sent to LLM
+            prompt_text = "\n---\n".join([f"{getattr(m, 'type', 'user').upper()}: {m.content}" for m in formatted_prompt.to_messages()])
+            pipeline_logger.info(f"[STEP] Sending prompt to LLM:\n{prompt_text}")
             
-            # Clean LLM output
-            raw_json = response.text.strip()
+            # Token breakdown
+            model_name = settings.openai_model
+            enc = tiktoken.encoding_for_model(model_name)
+            system_message = SystemMessagePromptTemplate.from_template(self.system_template).format(format_instructions="")
+            system_tokens = len(enc.encode(system_message.content))
+            human_message = HumanMessagePromptTemplate.from_template(self.human_template).format(
+                subject=email.subject,
+                content=translated_content,
+                sender=f"{email.sender_name} <{email.sender_email}>",
+                language=language
+            )
+            human_tokens = len(enc.encode(human_message.content))
+            format_instructions = self.output_parser.get_format_instructions()
+            format_tokens = len(enc.encode(format_instructions))
+            def count_tokens_for_prompt(model_name, messages):
+                enc = tiktoken.encoding_for_model(model_name)
+                num_tokens = 0
+                for message in messages:
+                    num_tokens += 4  # every message metadata (OpenAI chat format)
+                    for key, value in message.items():
+                        num_tokens += len(enc.encode(value))
+                num_tokens += 2  # every reply is primed with <|start|>assistant<|message|>
+                return num_tokens
+            messages = formatted_prompt.to_messages()
+            def message_to_dict(m):
+                if hasattr(m, "to_dict"):
+                    return m.to_dict()
+                return {
+                    "role": getattr(m, "type", "user"),
+                    "content": m.content
+                }
+            prompt_tokens = count_tokens_for_prompt(model_name, [message_to_dict(m) for m in messages])
+            pipeline_logger.info(f"[TOKENS] System prompt tokens: {system_tokens}")
+            pipeline_logger.info(f"[TOKENS] Human prompt tokens: {human_tokens}")
+            pipeline_logger.info(f"[TOKENS] Format/schema tokens: {format_tokens}")
+            pipeline_logger.info(f"[TOKENS] Prompt tokens (total, with overhead): {prompt_tokens}")
+            
+            # Get AI response with retries
+            pipeline_logger.info("[STEP] Awaiting LLM response...")
+            response = await self._get_ai_response_with_retries(messages)
+            
+            # Token counting for response
+            response_text = response.text.strip()
+            response_tokens = len(enc.encode(response_text))
+            total_tokens = prompt_tokens + response_tokens
+            pipeline_logger.info(f"[STEP] LLM response received. Logging response text:")
+            pipeline_logger.info(f"[LLM RESPONSE]\n{response_text}")
+            pipeline_logger.info(f"[TOKENS] Response tokens: {response_tokens}")
+            pipeline_logger.info(f"[TOKENS] Total tokens (prompt + response): {total_tokens}")
+            
             # Extract the first JSON object from the output, even if surrounded by text/code blocks
-            json_match = re.search(r'({[\s\S]*})', raw_json)
+            json_match = re.search(r'({[\s\S]*})', response_text)
             if not json_match:
-                logger.error(f"LLM did not return valid JSON: {raw_json}")
+                pipeline_logger.error(f"LLM did not return valid JSON: {response_text}")
                 return self._create_fallback_response(email, "Extraction failed: LLM output is not valid JSON")
             raw_json = json_match.group(1)
             data = json.loads(raw_json)
+            pipeline_logger.info("[STEP] Parsed LLM response JSON. Beginning post-processing and validation.")
 
             # Fix: Set default for number_of_quote_options if None or missing
             if (data or {}).get("number_of_quote_options") is None:
                 data["number_of_quote_options"] = 1
-
-            # Fix: Set default for urgent_request if None or missing
             if (data or {}).get("urgent_request") is None:
                 data["urgent_request"] = False
-
-            # (Optional) Normalize travel_dates here as well if needed
             if isinstance((data or {}).get("travel_dates"), dict):
                 def _normalize_date(date_str):
                     try:
@@ -202,18 +266,20 @@ class EnhancedTravelInfoExtractor:
                 for key in ['start', 'end', 'start_date', 'end_date']:
                     if key in (data["travel_dates"] or {}) and data["travel_dates"][key]:
                         data["travel_dates"][key] = _normalize_date(data["travel_dates"][key])
-
-            # Now parse with Pydantic
             travel_info = self.output_parser.parse(json.dumps(data))
-            
-            # Post-process and validate
+            pipeline_logger.info("[STEP] Post-processing extracted info (normalization, validation, enrichment)")
             travel_info = self._post_process_extraction(travel_info, email, content)
-            
-            logger.info(f"Successfully extracted travel info with {travel_info.extraction_confidence}% confidence")
+            pipeline_logger.info(f"[STEP] Extraction complete. Extraction confidence: {travel_info.extraction_confidence}%")
+            # Log what will be used for Excel generation
+            pipeline_logger.info(f"[STEP] Data to be used for Excel generation: {travel_info}")
+            # Optionally, log Excel generation step if called here
+            # pipeline_logger.info("[STEP] Generating Excel quote...")
+            # ... (call Excel generation and log the output file path)
+            end_time = time.monotonic()
+            pipeline_logger.info(f"[PERFORMANCE] Total processing time for this email: {end_time - start_time:.2f} seconds")
             return travel_info
-            
         except Exception as e:
-            logger.error(f"Failed to extract travel information: {e}")
+            pipeline_logger.error(f"Failed to extract travel information: {e}")
             return self._create_fallback_response(email, str(e))
     
     async def _get_ai_response_with_retries(self, messages, max_retries=3):
@@ -569,3 +635,4 @@ class ConversationManager:
 
 # Export the enhanced class with the original name for compatibility
 TravelInfoExtractor = EnhancedTravelInfoExtractor
+
