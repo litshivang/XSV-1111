@@ -15,6 +15,8 @@ from app.utils.redis_client import get_redis_client
 
 logger = get_logger(__name__)
 
+CONCURRENCY_LIMIT = 20  # Tune this based on LLM rate limits and system resources
+
 class TravelAgent:
     """Main agent class that orchestrates the entire workflow"""
     
@@ -105,7 +107,7 @@ class TravelAgent:
             }
     
     async def process_batch(self, max_emails: Optional[int] = None) -> int:
-        """Process a batch of unread emails and log a table of tokens/time"""
+        """Process a batch of unread emails and log a table of tokens/time (concurrent version)"""
         batch_start = time.monotonic()
         token_rows = []
         try:
@@ -117,8 +119,16 @@ class TravelAgent:
                 logger.info("No new travel inquiry emails found from Gmail or Outlook.")
                 return 0
             processed_count = 0
-            for message in messages:
-                success, token_info = await self.process_single_email(message)
+            semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+            async def process_with_semaphore(message):
+                async with semaphore:
+                    return await self.process_single_email(message)
+
+            tasks = [process_with_semaphore(msg) for msg in messages]
+            results = await asyncio.gather(*tasks)
+
+            for success, token_info in results:
                 if token_info is not None:
                     token_rows.append(token_info)
                 if success:
