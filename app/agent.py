@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import List, Optional
 from datetime import datetime, timedelta
+import time
 
 from app.config import settings
 from app.services.email_service import EmailService
@@ -49,6 +50,7 @@ class TravelAgent:
     
     async def process_single_email(self, message: EmailMessage) -> bool:
         """Process a single email message"""
+        start_time = time.monotonic()
         try:
             # Skip if already processed
             if await self._is_email_processed(message.message_id):
@@ -82,17 +84,20 @@ class TravelAgent:
             # await self._mark_email_processed(message.message_id)
             # await self._mark_email_as_read(message)
             
-            logger.info(f"Successfully processed email: {message.message_id}")
+            elapsed = time.monotonic() - start_time
+            logger.info(f"Successfully processed email: {message.message_id} | Time taken: {elapsed:.2f} seconds")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to process email {message.message_id}: {e}")
+            elapsed = time.monotonic() - start_time
+            logger.error(f"Failed to process email {message.message_id} after {elapsed:.2f} seconds: {e}")
             message.processing_status = ProcessingStatus.FAILED
             message.error_message = str(e)
             return False
     
     async def process_batch(self, max_emails: Optional[int] = None) -> int:
         """Process a batch of unread emails"""
+        batch_start = time.monotonic()
         try:
             messages = await self.email_service.get_travel_inquiries(
                 source="both",
@@ -108,9 +113,12 @@ class TravelAgent:
                 if processed_count >= settings.rate_limit_per_minute:
                     logger.warning("Rate limit reached, pausing processing")
                     break
+            batch_elapsed = time.monotonic() - batch_start
+            logger.debug(f"Batch processing complete: {processed_count} emails processed | Total time: {batch_elapsed:.2f} seconds")
             return processed_count
         except Exception as e:
-            logger.error(f"Batch processing failed: {e}")
+            batch_elapsed = time.monotonic() - batch_start
+            logger.error(f"Batch processing failed after {batch_elapsed:.2f} seconds: {e}")
             return 0
     
     async def run_continuous(self):
