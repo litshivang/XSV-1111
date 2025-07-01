@@ -161,8 +161,8 @@ class EnhancedTravelInfoExtractor:
             human_message
         ])
     
-    async def extract_travel_info(self, email: EmailMessage) -> TravelInquiryData:
-        """Extract travel information with enhanced accuracy"""
+    async def extract_travel_info(self, email: EmailMessage):
+        """Extract travel information with enhanced accuracy and return token/time info"""
         start_time = time.monotonic()
         try:
             pipeline_logger.info("=== [STEP] Starting agent for new email ===")
@@ -191,7 +191,7 @@ class EnhancedTravelInfoExtractor:
             
             # Log the full prompt being sent to LLM
             prompt_text = "\n---\n".join([f"{getattr(m, 'type', 'user').upper()}: {m.content}" for m in formatted_prompt.to_messages()])
-            pipeline_logger.info(f"[STEP] Sending prompt to LLM:\n{prompt_text}")
+            pipeline_logger.info(f"[STEP] Sending prompt to LLM:")
             
             # Token breakdown
             model_name = settings.openai_model
@@ -247,7 +247,12 @@ class EnhancedTravelInfoExtractor:
             json_match = re.search(r'({[\s\S]*})', response_text)
             if not json_match:
                 pipeline_logger.error(f"LLM did not return valid JSON: {response_text}")
-                return self._create_fallback_response(email, "Extraction failed: LLM output is not valid JSON")
+                return self._create_fallback_response(email, "Extraction failed: LLM output is not valid JSON"), {
+                    'prompt_tokens': prompt_tokens,
+                    'response_tokens': response_tokens,
+                    'total_tokens': total_tokens,
+                    'time_taken': time.monotonic() - start_time
+                }
             raw_json = json_match.group(1)
             data = json.loads(raw_json)
             pipeline_logger.info("[STEP] Parsed LLM response JSON. Beginning post-processing and validation.")
@@ -277,10 +282,20 @@ class EnhancedTravelInfoExtractor:
             # ... (call Excel generation and log the output file path)
             end_time = time.monotonic()
             pipeline_logger.info(f"[PERFORMANCE] Total processing time for this email: {end_time - start_time:.2f} seconds")
-            return travel_info
+            return travel_info, {
+                'prompt_tokens': prompt_tokens,
+                'response_tokens': response_tokens,
+                'total_tokens': total_tokens,
+                'time_taken': end_time - start_time
+            }
         except Exception as e:
             pipeline_logger.error(f"Failed to extract travel information: {e}")
-            return self._create_fallback_response(email, str(e))
+            return self._create_fallback_response(email, str(e)), {
+                'prompt_tokens': 0,
+                'response_tokens': 0,
+                'total_tokens': 0,
+                'time_taken': time.monotonic() - start_time
+            }
     
     async def _get_ai_response_with_retries(self, messages, max_retries=3):
         """Get AI response with enhanced retry logic"""

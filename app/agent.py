@@ -48,22 +48,22 @@ class TravelAgent:
         except Exception as e:
             logger.error(f"Failed to mark email as read: {e}")
     
-    async def process_single_email(self, message: EmailMessage) -> bool:
-        """Process a single email message"""
+    async def process_single_email(self, message: EmailMessage):
+        """Process a single email message and return token/time info for table"""
         start_time = time.monotonic()
         try:
             # Skip if already processed
             if await self._is_email_processed(message.message_id):
                 logger.info(f"Skipping already processed email: {message.message_id}")
-                return False
+                return False, None
                 
             # Only process emails from our sender
             if message.sender_email != settings.sender_email:
                 logger.info(f"Skipping email from unauthorized sender: {message.sender_email}")
-                return False
+                return False, None
             
             # Extract trip requirements using AI
-            inquiry = await self.ai_extractor.extract_travel_info(message)
+            inquiry, token_info = await self.ai_extractor.extract_travel_info(message)
             # Generate enhanced quote data (should be replaced with real pricing logic)
             quote_data = TravelQuoteData.create_enhanced_placeholder(inquiry)
             # Generate Excel quote
@@ -86,18 +86,28 @@ class TravelAgent:
             
             elapsed = time.monotonic() - start_time
             logger.info(f"Successfully processed email: {message.message_id} | Time taken: {elapsed:.2f} seconds")
-            return True
+            # Add message_id to token_info for table
+            if token_info is not None:
+                token_info['message_id'] = message.message_id
+            return True, token_info
             
         except Exception as e:
             elapsed = time.monotonic() - start_time
             logger.error(f"Failed to process email {message.message_id} after {elapsed:.2f} seconds: {e}")
             message.processing_status = ProcessingStatus.FAILED
             message.error_message = str(e)
-            return False
+            return False, {
+                'message_id': message.message_id,
+                'prompt_tokens': 0,
+                'response_tokens': 0,
+                'total_tokens': 0,
+                'time_taken': elapsed
+            }
     
     async def process_batch(self, max_emails: Optional[int] = None) -> int:
-        """Process a batch of unread emails"""
+        """Process a batch of unread emails and log a table of tokens/time"""
         batch_start = time.monotonic()
+        token_rows = []
         try:
             messages = await self.email_service.get_travel_inquiries(
                 source="both",
@@ -108,13 +118,32 @@ class TravelAgent:
                 return 0
             processed_count = 0
             for message in messages:
-                if await self.process_single_email(message):
+                success, token_info = await self.process_single_email(message)
+                if token_info is not None:
+                    token_rows.append(token_info)
+                if success:
                     processed_count += 1
                 if processed_count >= settings.rate_limit_per_minute:
                     logger.warning("Rate limit reached, pausing processing")
                     break
             batch_elapsed = time.monotonic() - batch_start
-            logger.debug(f"Batch processing complete: {processed_count} emails processed | Total time: {batch_elapsed:.2f} seconds")
+            # Compute totals
+            total_prompt = sum(row.get('prompt_tokens', 0) for row in token_rows)
+            total_response = sum(row.get('response_tokens', 0) for row in token_rows)
+            total_tokens = sum(row.get('total_tokens', 0) for row in token_rows)
+            total_time = sum(row.get('time_taken', 0) for row in token_rows)
+            # Build table
+            table_lines = [
+                "\nBatch Processing Summary (Tokens & Time):",
+                f"{'Email ID':<30} | {'Prompt':>8} | {'Response':>8} | {'Total':>8} | {'Time (s)':>9}",
+                "-"*75
+            ]
+            for row in token_rows:
+                table_lines.append(f"{row.get('message_id','')[:30]:<30} | {row.get('prompt_tokens',0):>8} | {row.get('response_tokens',0):>8} | {row.get('total_tokens',0):>8} | {row.get('time_taken',0):>9.2f}")
+            table_lines.append("-"*75)
+            table_lines.append(f"{'TOTAL':<30} | {total_prompt:>8} | {total_response:>8} | {total_tokens:>8} | {total_time:>9.2f}")
+            logger.info("\n" + "\n".join(table_lines))
+            logger.info(f"Batch processing complete: {processed_count} emails processed | Total time: {batch_elapsed:.2f} seconds")
             return processed_count
         except Exception as e:
             batch_elapsed = time.monotonic() - batch_start
